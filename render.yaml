@@ -1,0 +1,116 @@
+# Render blueprint — Phase 2
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: assistant-api
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: APP_ENV
+        value: prod
+      - key: DATABASE_URL
+        fromDatabase:
+          name: assistant-db
+          property: connectionString
+      - fromGroup: assistant-secrets
+  - type: worker
+    name: assistant-bot
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.bot
+    envVars:
+      - key: APP_ENV
+        value: prod
+      - key: DATABASE_URL
+        fromDatabase:
+          name: assistant-db
+          property: connectionString
+      - fromGroup: assistant-secrets
+  - type: worker
+    name: assistant-outbox
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.jobs.outbox_worker
+    envVars:
+      - key: APP_ENV
+        value: prod
+      - key: DATABASE_URL
+        fromDatabase:
+          name: assistant-db
+          property: connectionString
+      - fromGroup: assistant-secrets
+  - type: worker
+    name: assistant-reminders
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.jobs.reminder_worker
+    envVars:
+      - key: APP_ENV
+        value: prod
+      - key: DATABASE_URL
+        fromDatabase:
+          name: assistant-db
+          property: connectionString
+      - fromGroup: assistant-secrets
+
+  # Cron jobs only ENQUEUE work. They do not touch persistent disks.
+  - type: cron
+    name: daily-brief
+    runtime: python
+    schedule: "30 2 * * *"  # 08:00 IST = 02:30 UTC
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.jobs.daily_brief
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: assistant-db
+          property: connectionString
+      - fromGroup: assistant-secrets
+
+databases:
+  - name: assistant-db
+    plan: starter
+    databaseName: assistant
+    user: assistant
+
+envVarGroups:
+  - name: assistant-secrets
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ALLOWED_USER_IDS
+        sync: false      - key: ADMIN_PIN
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_APP_SECRET
+        sync: false
+      - key: WHATSAPP_CLOUD_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: TIMEZONE
+        value: Asia/Kolkata      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: QUIET_HOURS_START
+        value: "22"
+      - key: QUIET_HOURS_END
+        value: "8"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
