@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Telegram bot - the secure control plane.
 
 Commands (Phase 1 + 2 + 3):
@@ -960,7 +961,8 @@ def build_app():
     app.add_handler(CommandHandler("votes",          cmd_votes))
     app.add_handler(CommandHandler("callinglist",    cmd_callinglist))
     app.add_handler(CommandHandler("closeevent",      cmd_closeevent))
-    app.add_handler(CommandHandler("groups",          cmd_groups))    app.add_handler(CommandHandler("testrsvp",        cmd_testrsvp))
+    app.add_handler(CommandHandler("groups",          cmd_groups))
+    app.add_handler(CommandHandler("testrsvp",        cmd_testrsvp))
     app.add_handler(CommandHandler("cleartestrsvps",  cmd_cleartestrsvps))
     app.add_handler(CommandHandler("bulkrsvp",        cmd_bulkrsvp))
 
