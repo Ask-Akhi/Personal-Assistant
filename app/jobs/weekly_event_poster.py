@@ -16,6 +16,7 @@ from app.config import get_settings
 from app.db import session_scope
 from app.logging_setup import log
 from app.models import CricketEvent, EventStatus
+from app.services.time_utils import as_utc_naive
 
 AET = pytz.timezone("Australia/Sydney")
 
@@ -53,8 +54,8 @@ async def _already_exists_for(event_at: datetime) -> bool:
     from sqlalchemy import select
     async with session_scope() as s:
         # Check within +/- 12 hours of the target datetime
-        lo = event_at - timedelta(hours=12)
-        hi = event_at + timedelta(hours=12)
+        lo = as_utc_naive(event_at - timedelta(hours=12))
+        hi = as_utc_naive(event_at + timedelta(hours=12))
         row = (await s.execute(
             select(CricketEvent).where(
                 CricketEvent.event_at >= lo,

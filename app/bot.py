@@ -108,6 +108,14 @@ async def cmd_ping(update: Update, _ctx):
     await update.message.reply_text("pong ✅")
 
 
+async def handle_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    log.error("bot.handler_error", error=str(ctx.error), exc_info=ctx.error)
+    if isinstance(update, Update) and update.effective_message:
+        await update.effective_message.reply_text(
+            f"Command failed: {str(ctx.error)[:300]}"
+        )
+
+
 @allowlist_only
 async def cmd_whoami(update: Update, _ctx):
     u = update.effective_user
@@ -973,6 +981,7 @@ def build_app():
     app.add_handler(CommandHandler("bulkrsvp",        cmd_bulkrsvp))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_reply))
+    app.add_error_handler(handle_error)
 
     return app
 
