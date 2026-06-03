@@ -19,7 +19,7 @@ from app.db import engine, session_scope
 from app.logging_setup import log, setup_logging
 from app.models import Base
 from app.services import audit, idempotency, telegram_notify, whatsapp_ingest
-from app.services import draft_manager
+from app.services import draft_manager, event_manager
 
 setup_logging()
 settings = get_settings()
@@ -55,6 +55,17 @@ async def _run_reminder_worker():
     await run()
 
 
+async def _run_event_scheduler():
+    """Check every 5 minutes for events that have passed their cutoff."""
+    from app.jobs.event_scheduler import run_once
+    while True:
+        try:
+            await run_once()
+        except Exception as exc:
+            log.error("event_scheduler.error", error=str(exc))
+        await asyncio.sleep(300)  # 5 minutes
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # Auto-create tables on first run
@@ -66,6 +77,7 @@ async def lifespan(_: FastAPI):
     _background_tasks.append(asyncio.create_task(_run_bot(), name="bot"))
     _background_tasks.append(asyncio.create_task(_run_outbox_worker(), name="outbox"))
     _background_tasks.append(asyncio.create_task(_run_reminder_worker(), name="reminders"))
+    _background_tasks.append(asyncio.create_task(_run_event_scheduler(), name="event_scheduler"))
     log.info("workers.started", count=len(_background_tasks))
 
     yield
@@ -197,8 +209,14 @@ async def wa_inbound(request: Request):
 
         if inbound is not None:
             await telegram_notify.send_admin_message(_mirror_text(contact, inbound))
-            # Phase 2: policy check + Claude draft + Telegram approval card
-            await draft_manager.handle_inbound(contact, inbound)
+
+            # Phase 2/3: check if this is a cricket event RSVP first
+            async with session_scope() as s:
+                is_rsvp = await event_manager.handle_possible_rsvp(s, contact, inbound)
+
+            if not is_rsvp:
+                # Normal message — policy check + AI draft + Telegram approval card
+                await draft_manager.handle_inbound(contact, inbound)
 
     return {
         "ok": True,

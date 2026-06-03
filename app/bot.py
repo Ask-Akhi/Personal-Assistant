@@ -1,24 +1,34 @@
-"""Telegram bot — the secure control plane.
+"""Telegram bot - the secure control plane.
 
-Commands (Phase 1 + 2):
+Commands (Phase 1 + 2 + 3):
   /start, /ping, /whoami
-  /unlock <pin>           — start PIN session
-  /lock                   — end PIN session
-  /note <text>            — quick memory note
-  /notes [subject]        — list recent memory entries
-  /memory rm <id>         — delete memory entry (PIN required)
-  /audit [n]              — last n audit log entries
-  /inbox [n]              — last n inbound WhatsApp messages
-  /quiet                  — show quiet-hours status
-  /drafts [n]             — list pending drafts
-  /cancel <outbox_id>     — cancel outbox item inside undo window
+  /unlock <pin>           - start PIN session
+  /lock                   - end PIN session
+  /note <text>            - quick memory note
+  /notes [subject]        - list recent memory entries
+  /memory rm <id>         - delete memory entry (PIN required)
+  /audit [n]              - last n audit log entries
+  /inbox [n]              - last n inbound WhatsApp messages
+  /quiet                  - show quiet-hours status
+  /drafts [n]             - list pending drafts
+  /cancel <outbox_id>     - cancel outbox item inside undo window
+
+  /newevent <title> | <YYYY-MM-DD HH:MM> | [venue] | [group_wa_id] | [cutoff_hours]
+                          - create a new cricket/sports event
+  /votes                  - show live RSVPs for the active event
+  /callinglist            - preview + manually send calling list
+  /closeevent             - cancel the active event without sending
 
 Inline button callbacks (Phase 2):
-  draft:approve:<id>:<idx>  — send suggestion i
-  draft:edit:<id>           — enter edit flow (reply with new text)
-  draft:regen:<id>          — regenerate suggestions
-  draft:reject:<id>         — discard draft
-  draft:cancel:<id>         — undo after approval (within 30s window)
+  draft:approve:<id>:<idx>  - send suggestion i
+  draft:edit:<id>           - enter edit flow (reply with new text)
+  draft:regen:<id>          - regenerate suggestions
+  draft:reject:<id>         - discard draft
+  draft:cancel:<id>         - undo after approval (within 30s window)
+
+Inline button callbacks (Phase 3 events):
+  event:send:<id>           - immediately send calling list to WA group
+  event:cancel:<id>         - cancel auto-send of calling list
 """
 from __future__ import annotations
 
@@ -39,15 +49,18 @@ from telegram.ext import (
 from app.config import get_settings
 from app.db import engine, session_scope
 from app.logging_setup import log, setup_logging
-from app.models import AuditLog, Base, Contact, Draft, DraftStatus, InboundMessage, MemoryKind
-from app.services import audit, auth, draft_manager, memory
+from app.models import (
+    AuditLog, Base, Contact, CricketEvent, Draft, DraftStatus,
+    EventRsvp, EventStatus, InboundMessage, MemoryKind, RsvpStatus,
+)
+from app.services import audit, auth, draft_manager, event_manager, memory
 from app.services.quiet_hours import is_quiet_now
 
 setup_logging()
 settings = get_settings()
 
 
-# ── Decorators ───────────────────────────────────────────────────────
+# - Decorators -
 def allowlist_only(fn):
     @wraps(fn)
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -74,11 +87,11 @@ def pin_required(fn):
     return wrapper
 
 
-# ── Phase 1 commands ─────────────────────────────────────────────────
+# - Phase 1 commands -
 @allowlist_only
 async def cmd_start(update: Update, _ctx):
     await update.message.reply_text(
-        "🤖 Personal Assistant — Phase 2 (Drafting)\n"
+        "🤖 Personal Assistant - Phase 2 (Drafting)\n"
         "Commands: /ping /whoami /note /notes /audit /inbox /quiet /drafts\n"
         "Destructive commands require /unlock <pin>."
     )
@@ -224,7 +237,7 @@ async def cmd_quiet(update: Update, _ctx):
     )
 
 
-# ── Phase 2 commands ─────────────────────────────────────────────────
+# - Phase 2 commands -
 @allowlist_only
 async def cmd_drafts(update: Update, ctx):
     n = int(ctx.args[0]) if ctx.args and ctx.args[0].isdigit() else 10
@@ -270,7 +283,7 @@ async def cmd_canceledit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Edit cancelled.")
 
 
-# ── Phase 2 inline button callbacks ──────────────────────────────────
+# - Phase 2 inline button callbacks -
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id if query.from_user else 0
@@ -338,7 +351,78 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(msg)
 
 
-# ── Edit-reply plain text handler ────────────────────────────────────
+# - Phase 2/3 Event callbacks (calling list approve/cancel) -
+async def handle_event_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id if query.from_user else 0
+    if not auth.is_allowed(uid):
+        await query.answer("Not authorised.")
+        return
+    await query.answer()
+
+    parts = (query.data or "").split(":")
+    # pattern: event:send:<id>  or  event:cancel:<id>
+    if len(parts) < 3 or parts[0] != "event":
+        return
+
+    action, event_id = parts[1], int(parts[2])
+
+    async with session_scope() as s:
+        db_event = await s.get(CricketEvent, event_id)
+        if not db_event:
+            await query.message.reply_text("⚠️ Event not found.")
+            return
+
+        if action == "send":
+            if db_event.status == EventStatus.closed:
+                await query.message.reply_text("Already sent.")
+                return
+            # Build fresh calling list and send immediately
+            calling_list = await event_manager.build_calling_list(s, db_event)
+            db_event.calling_list_text = calling_list
+            db_event.status = EventStatus.closed
+            await audit.record(s, actor=f"user:{uid}", action="calling_list_manual_send",
+                               target=str(event_id))
+
+        elif action == "cancel":
+            if db_event.status != EventStatus.open:
+                await query.message.reply_text("⚠️ Event already closed/cancelled.")
+                return
+            db_event.status = EventStatus.cancelled
+            await audit.record(s, actor=f"user:{uid}", action="calling_list_cancelled",
+                               target=str(event_id))
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await query.message.reply_text(f"🛑 Calling list send cancelled for *{db_event.title}*.",
+                                           parse_mode="Markdown")
+            return
+
+    if action == "send":
+        # Send to WA group
+        from app.services import wa_sender
+        if db_event.group_wa_id:
+            try:
+                await wa_sender.send_text(db_event.group_wa_id, calling_list)
+                await query.message.reply_text(f"✅ Calling list sent to WhatsApp group!")
+            except Exception as exc:
+                await query.message.reply_text(
+                    f"⚠️ WA send failed: `{str(exc)[:200]}`\n\nCopy manually:\n```\n{calling_list[:3000]}\n```",
+                    parse_mode="Markdown"
+                )
+        else:
+            await query.message.reply_text(
+                f"📋 No WA group ID set. Copy the calling list manually:\n```\n{calling_list[:3000]}\n```",
+                parse_mode="Markdown"
+            )
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+
+# - Edit-reply plain text handler -
 @allowlist_only
 async def handle_edit_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.user_data.get("awaiting_edit"):
@@ -350,13 +434,168 @@ async def handle_edit_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     new_text = (update.message.text or "").strip()
     if not new_text:
-        await update.message.reply_text("Empty text — edit cancelled.")
+        await update.message.reply_text("Empty text - edit cancelled.")
         return
     msg = await draft_manager.edit_draft(draft_id, new_text, uid)
     await update.message.reply_text(msg)
 
 
-# ── Bootstrap ────────────────────────────────────────────────────────
+# - Phase 2/3 Event commands -
+
+@allowlist_only
+async def cmd_newevent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    Usage: /newevent <title> | <YYYY-MM-DD HH:MM> | [venue] | [group_wa_id] | [cutoff_hours]
+    Example: /newevent T20 Cricket | 2026-06-07 06:30 | Oval Ground | 120363XXXXXX@g.us | 36
+    """
+    text = " ".join(ctx.args) if ctx.args else ""
+    parts = [p.strip() for p in text.split("|")]
+    if len(parts) < 2:
+        await update.message.reply_text(
+            "Usage: `/newevent <title> | <YYYY-MM-DD HH:MM> | [venue] | [group_wa_id] | [cutoff_hours]`\n"
+            "Example: `/newevent T20 Cricket | 2026-06-07 06:30 | Oval Ground | 120363XXX@g.us | 36`",
+            parse_mode="Markdown"
+        )
+        return
+
+    from datetime import datetime, timezone, timedelta
+    title = parts[0]
+    try:
+        event_at_naive = datetime.strptime(parts[1], "%Y-%m-%d %H:%M")
+        event_at = event_at_naive.replace(tzinfo=timezone.utc)
+    except ValueError:
+        await update.message.reply_text("⚠️ Date format must be `YYYY-MM-DD HH:MM` (UTC)")
+        return
+
+    venue = parts[2] if len(parts) > 2 else None
+    group_wa_id = parts[3] if len(parts) > 3 else None
+    cutoff_hours = float(parts[4]) if len(parts) > 4 and parts[4].replace(".", "").isdigit() else 36.0
+
+    cutoff_at = event_at - timedelta(hours=cutoff_hours)
+
+    uid = update.effective_user.id
+    async with session_scope() as s:
+        # Close any previously open events
+        from sqlalchemy import select as _select
+        open_events = (await s.execute(
+            _select(CricketEvent).where(CricketEvent.status == EventStatus.open)
+        )).scalars().all()
+        for ev in open_events:
+            ev.status = EventStatus.cancelled
+
+        new_event = CricketEvent(
+            title=title,
+            event_at=event_at,
+            venue=venue,
+            group_wa_id=group_wa_id,
+            cutoff_hours=cutoff_hours,
+            cutoff_at=cutoff_at,
+            status=EventStatus.open,
+        )
+        s.add(new_event)
+        await s.flush()
+        event_id = new_event.id
+
+        await audit.record(s, actor=f"user:{uid}", action="event_created",
+                           target=str(event_id),
+                           payload={"title": title, "event_at": str(event_at),
+                                    "cutoff_hours": cutoff_hours})
+
+    venue_line = f"\n📍 Venue: {venue}" if venue else ""
+    group_line = f"\n📱 WA Group: `{group_wa_id}`" if group_wa_id else "\n⚠️ No WA group ID set - calling list will be sent to Telegram only."
+
+    await update.message.reply_text(
+        f"✅ *Event created!* (#{event_id})\n"
+        f"🏏 *{title}*\n"
+        f"📅 {event_at.strftime('%a, %b %-d at %-I:%M %p')} UTC"
+        f"{venue_line}\n"
+        f"⏰ Cutoff: {cutoff_at.strftime('%a, %b %-d at %-I:%M %p')} UTC ({cutoff_hours}h before)"
+        f"{group_line}\n\n"
+        f"Now send the event announcement to your WhatsApp group. RSVPs will be tracked automatically!",
+        parse_mode="Markdown"
+    )
+
+
+@allowlist_only
+async def cmd_votes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show current RSVP count for the active event."""
+    async with session_scope() as s:
+        ev = await event_manager.get_active_event(s)
+        if not ev:
+            await update.message.reply_text("No active event. Create one with /newevent")
+            return
+        rows = await event_manager.get_rsvps(s, ev.id)
+
+    if not rows:
+        await update.message.reply_text(
+            f"🏏 *{ev.title}* - No RSVPs yet.\n"
+            f"📅 {ev.event_at.strftime('%a, %b %-d')} | "
+            f"Cutoff: {ev.cutoff_at.strftime('%a, %b %-d %-I:%M %p') if ev.cutoff_at else 'N/A'} UTC",
+            parse_mode="Markdown"
+        )
+        return
+
+    going = [(r, c) for r, c in rows if r.status in (RsvpStatus.yes, RsvpStatus.wnbo)]
+    not_coming = [(r, c) for r, c in rows if r.status == RsvpStatus.no]
+    maybe = [(r, c) for r, c in rows if r.status == RsvpStatus.maybe]
+
+    def fmt(pairs):
+        return ", ".join(
+            f"{c.display_name or c.external_id}" + (" _(wnbo)_" if r.status == RsvpStatus.wnbo else "")
+            for r, c in pairs
+        )
+
+    lines = [f"🏏 *{ev.title}* - Live RSVPs\n"]
+    if going:
+        lines.append(f"✅ *Going ({len(going)}):* {fmt(going)}")
+    if maybe:
+        lines.append(f"🤔 *Maybe ({len(maybe)}):* {fmt(maybe)}")
+    if not_coming:
+        lines.append(f"❌ *Not coming ({len(not_coming)}):* {fmt(not_coming)}")
+
+    cutoff_str = ev.cutoff_at.strftime("%a %b %-d %-I:%M %p") if ev.cutoff_at else "N/A"
+    lines.append(f"\n⏰ Cutoff: {cutoff_str} UTC")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+@allowlist_only
+async def cmd_callinglist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Preview or manually send the calling list for the active event."""
+    async with session_scope() as s:
+        ev = await event_manager.get_active_event(s)
+        if not ev:
+            await update.message.reply_text("No active event.")
+            return
+        calling_list = await event_manager.build_calling_list(s, ev)
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📤 Send to WA Group", callback_data=f"event:send:{ev.id}"),
+        InlineKeyboardButton("🛑 Cancel", callback_data=f"event:cancel:{ev.id}"),
+    ]])
+    await update.message.reply_text(
+        f"📋 *Preview - {ev.title}*\n\n```\n{calling_list}\n```",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+
+
+@allowlist_only
+async def cmd_closeevent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Manually close the active event without sending the calling list."""
+    uid = update.effective_user.id
+    async with session_scope() as s:
+        ev = await event_manager.get_active_event(s)
+        if not ev:
+            await update.message.reply_text("No active event to close.")
+            return
+        ev.status = EventStatus.cancelled
+        await audit.record(s, actor=f"user:{uid}", action="event_manually_closed",
+                           target=str(ev.id))
+    await update.message.reply_text(f"🛑 Event *{ev.title}* closed.", parse_mode="Markdown")
+
+
+# - Bootstrap -
 async def _ensure_schema():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -380,13 +619,19 @@ def build_app():
     app.add_handler(CommandHandler("memory",  cmd_memory))
     app.add_handler(CommandHandler("audit",   cmd_audit))
     app.add_handler(CommandHandler("inbox",   cmd_inbox))
-    app.add_handler(CommandHandler("quiet",   cmd_quiet))
+    app.add_handler(CommandHandler("quiet",   cmd_quiet))    # Phase 2
+    app.add_handler(CommandHandler("drafts",      cmd_drafts))
+    app.add_handler(CommandHandler("cancel",      cmd_cancel_outbox))
+    app.add_handler(CommandHandler("canceledit",  cmd_canceledit))
+    app.add_handler(CallbackQueryHandler(handle_callback,       pattern=r"^draft:"))
+    app.add_handler(CallbackQueryHandler(handle_event_callback, pattern=r"^event:"))
 
-    # Phase 2
-    app.add_handler(CommandHandler("drafts",     cmd_drafts))
-    app.add_handler(CommandHandler("cancel",     cmd_cancel_outbox))
-    app.add_handler(CommandHandler("canceledit", cmd_canceledit))
-    app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^draft:"))
+    # Phase 2/3 - Event automation
+    app.add_handler(CommandHandler("newevent",    cmd_newevent))
+    app.add_handler(CommandHandler("votes",       cmd_votes))
+    app.add_handler(CommandHandler("callinglist", cmd_callinglist))
+    app.add_handler(CommandHandler("closeevent",  cmd_closeevent))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_reply))
 
     return app
