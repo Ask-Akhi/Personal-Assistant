@@ -1,6 +1,11 @@
-"""FastAPI gateway. Webhooks land here in later phases."""
+"""FastAPI gateway — all workers run as background tasks inside this process.
+
+Single-process deployment: API + Telegram bot + outbox + reminders + daily brief
+all co-exist here so we only need ONE free Render web service ($0/month on free tier).
+"""
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 import hashlib
 import html
@@ -19,14 +24,56 @@ from app.services import draft_manager
 setup_logging()
 settings = get_settings()
 
+_background_tasks: list[asyncio.Task] = []
+
+
+async def _run_bot():
+    """Run Telegram bot in background (polling mode)."""
+    try:
+        from app.bot import build_app
+        bot_app = build_app()
+        await bot_app.initialize()
+        await bot_app.start()
+        await bot_app.updater.start_polling(drop_pending_updates=True)
+        log.info("bot.started")
+        # Keep running until cancelled
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        await bot_app.updater.stop()
+        await bot_app.stop()
+        await bot_app.shutdown()
+
+
+async def _run_outbox_worker():
+    from app.jobs.outbox_worker import run
+    await run()
+
+
+async def _run_reminder_worker():
+    from app.jobs.reminder_worker import run
+    await run()
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Auto-create tables on first run (Alembic preferred in prod).
+    # Auto-create tables on first run
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     log.info("api.startup", env=settings.app_env)
+
+    # Start all background workers as asyncio tasks
+    _background_tasks.append(asyncio.create_task(_run_bot(), name="bot"))
+    _background_tasks.append(asyncio.create_task(_run_outbox_worker(), name="outbox"))
+    _background_tasks.append(asyncio.create_task(_run_reminder_worker(), name="reminders"))
+    log.info("workers.started", count=len(_background_tasks))
+
     yield
+
+    # Graceful shutdown
+    for task in _background_tasks:
+        task.cancel()
+    await asyncio.gather(*_background_tasks, return_exceptions=True)
     log.info("api.shutdown")
 
 

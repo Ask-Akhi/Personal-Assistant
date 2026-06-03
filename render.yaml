@@ -1,76 +1,17 @@
-# Render blueprint — PI Assistant
-# https://render.com/docs/blueprint-spec
+# Render blueprint — PI Assistant (single-process, free tier)
+# All workers (bot + outbox + reminders) run inside the FastAPI process.
+# Cost: $0/month on free tier (1 web service + 1 free postgres)
 services:
   - type: web
     name: assistant-api
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /healthz
     envVars:
       - key: APP_ENV
-        value: prod
-      - key: DATABASE_URL
-        fromDatabase:
-          name: assistant-db
-          property: connectionString
-      - fromGroup: assistant-secrets
-
-  - type: worker
-    name: assistant-bot
-    runtime: python
-    plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m app.bot
-    envVars:
-      - key: APP_ENV
-        value: prod
-      - key: DATABASE_URL
-        fromDatabase:
-          name: assistant-db
-          property: connectionString
-      - fromGroup: assistant-secrets
-
-  - type: worker
-    name: assistant-outbox
-    runtime: python
-    plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m app.jobs.outbox_worker
-    envVars:
-      - key: APP_ENV
-        value: prod
-      - key: DATABASE_URL
-        fromDatabase:
-          name: assistant-db
-          property: connectionString
-      - fromGroup: assistant-secrets
-
-  - type: worker
-    name: assistant-reminders
-    runtime: python
-    plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m app.jobs.reminder_worker
-    envVars:
-      - key: APP_ENV
-        value: prod
-      - key: DATABASE_URL
-        fromDatabase:
-          name: assistant-db
-          property: connectionString
-      - fromGroup: assistant-secrets
-
-  - type: cron
-    name: daily-brief
-    runtime: python
-    schedule: "30 2 * * *"
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m app.jobs.daily_brief
-    envVars:
-      - key: APP_ENV
-        value: prod
+        value: production
       - key: DATABASE_URL
         fromDatabase:
           name: assistant-db

@@ -362,13 +362,10 @@ async def _ensure_schema():
         await conn.run_sync(Base.metadata.create_all)
 
 
-def main() -> None:
+def build_app():
+    """Build and return the PTB Application (for embedding in main.py lifespan)."""
     if not settings.telegram_bot_token:
         raise SystemExit("TELEGRAM_BOT_TOKEN not set")
-    if not settings.allowed_user_ids:
-        raise SystemExit("TELEGRAM_ALLOWED_USER_IDS not set (get yours from @userinfobot)")
-
-    asyncio.get_event_loop().run_until_complete(_ensure_schema())
 
     app = Application.builder().token(settings.telegram_bot_token).build()
 
@@ -391,6 +388,19 @@ def main() -> None:
     app.add_handler(CommandHandler("canceledit", cmd_canceledit))
     app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^draft:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_reply))
+
+    return app
+
+
+def main() -> None:
+    if not settings.telegram_bot_token:
+        raise SystemExit("TELEGRAM_BOT_TOKEN not set")
+    if not settings.allowed_user_ids:
+        raise SystemExit("TELEGRAM_ALLOWED_USER_IDS not set (get yours from @userinfobot)")
+
+    asyncio.get_event_loop().run_until_complete(_ensure_schema())
+
+    app = build_app()
 
     log.info("bot.starting", allowed=len(settings.allowed_user_ids))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
