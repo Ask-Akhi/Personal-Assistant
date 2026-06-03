@@ -862,11 +862,13 @@ def build_app():
     app.add_handler(CommandHandler("quiet",   cmd_quiet))    # Phase 2
     app.add_handler(CommandHandler("drafts",      cmd_drafts))
     app.add_handler(CommandHandler("cancel",      cmd_cancel_outbox))
-    app.add_handler(CommandHandler("canceledit",  cmd_canceledit))
-    app.add_handler(CallbackQueryHandler(handle_callback,       pattern=r"^draft:"))
-    app.add_handler(CallbackQueryHandler(handle_event_callback, pattern=r"^event:"))    # Phase 2/3 - Event automation    app.add_handler(CommandHandler("newevent",    cmd_newevent))
-    app.add_handler(CommandHandler("announce",    cmd_announce))
-    app.add_handler(CommandHandler("votes",       cmd_votes))    app.add_handler(CommandHandler("callinglist",     cmd_callinglist))
+    app.add_handler(CommandHandler("canceledit",  cmd_canceledit))    app.add_handler(CallbackQueryHandler(handle_callback,       pattern=r"^draft:"))
+    app.add_handler(CallbackQueryHandler(handle_event_callback, pattern=r"^event:"))
+    # Phase 3 - Event automation
+    app.add_handler(CommandHandler("newevent",       cmd_newevent))
+    app.add_handler(CommandHandler("announce",       cmd_announce))
+    app.add_handler(CommandHandler("votes",          cmd_votes))
+    app.add_handler(CommandHandler("callinglist",    cmd_callinglist))
     app.add_handler(CommandHandler("closeevent",      cmd_closeevent))
     app.add_handler(CommandHandler("groups",          cmd_groups))
     app.add_handler(CommandHandler("testrsvp",        cmd_testrsvp))
