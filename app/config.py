@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: str = ""
     whatsapp_verify_token: str = ""
     whatsapp_app_secret: str = ""
+    whatsapp_group_id: str = ""   # e.g. 120363XXXXXXXXXX@g.us
     telegram_mirror_enabled: bool = True
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""

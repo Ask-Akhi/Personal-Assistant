@@ -66,6 +66,12 @@ async def _run_event_scheduler():
         await asyncio.sleep(300)  # 5 minutes
 
 
+async def _run_weekly_event_poster():
+    """Post T20 Cricket event every Tuesday 7 PM AET for Saturday."""
+    from app.jobs.weekly_event_poster import run
+    await run()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # Auto-create tables on first run
@@ -78,6 +84,7 @@ async def lifespan(_: FastAPI):
     _background_tasks.append(asyncio.create_task(_run_outbox_worker(), name="outbox"))
     _background_tasks.append(asyncio.create_task(_run_reminder_worker(), name="reminders"))
     _background_tasks.append(asyncio.create_task(_run_event_scheduler(), name="event_scheduler"))
+    _background_tasks.append(asyncio.create_task(_run_weekly_event_poster(), name="weekly_poster"))
     log.info("workers.started", count=len(_background_tasks))
 
     yield
