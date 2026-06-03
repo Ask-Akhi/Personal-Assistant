@@ -773,6 +773,95 @@ async def cmd_testrsvp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @allowlist_only
+async def cmd_bulkrsvp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Add multiple RSVPs at once.
+    Usage: /bulkrsvp yes: Name1, Name2, Name3 | wnbo: Name4 | no: Name5, Name6 | maybe: Name7
+    Example: /bulkrsvp yes: Akhi, Hitesh, Venu | wnbo: Manbir | no: Jogesh, Ankur | maybe: Giri
+    """
+    args_text = " ".join(ctx.args).strip() if ctx.args else ""
+    if not args_text:
+        await update.message.reply_text(
+            "Usage: <code>/bulkrsvp yes: Name1, Name2 | wnbo: Name3 | no: Name4 | maybe: Name5</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    async with session_scope() as s:
+        ev = await event_manager.get_active_event(s)
+        if not ev:
+            await update.message.reply_text(
+                "No active event. Run /announce first to create one."
+            )
+            return
+
+    results = []
+    errors = []
+
+    # Parse sections split by |
+    sections = args_text.split("|")
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+        if ":" not in section:
+            errors.append(f"Skipped (no colon): {section}")
+            continue
+        status_raw, names_raw = section.split(":", 1)
+        status_raw = status_raw.strip().lower()
+        status_map = {
+            "yes": "yes", "coming": "yes", "y": "yes",
+            "no": "no", "n": "no",
+            "wnbo": "wnbo", "w": "wnbo",
+            "maybe": "maybe", "m": "maybe",
+        }
+        status = status_map.get(status_raw)
+        if not status:
+            errors.append(f"Unknown status '{status_raw}'")
+            continue
+        names = [n.strip() for n in names_raw.split(",") if n.strip()]        for name in names:
+            try:
+                from app.models import RsvpStatus, InboundMessage
+                status_enum = RsvpStatus[status]
+                async with session_scope() as s:
+                    ev2 = await event_manager.get_active_event(s)
+                    contact = (await s.execute(
+                        select(Contact).where(Contact.external_id == f"test_{name.lower()}")
+                    )).scalar_one_or_none()
+                    if not contact:
+                        contact = Contact(
+                            external_id=f"test_{name.lower()}",
+                            display_name=name,
+                            platform="test",
+                        )
+                        s.add(contact)
+                        await s.flush()
+                    inbound = InboundMessage(
+                        contact_id=contact.id,
+                        platform="test",
+                        external_msg_id=f"test_{ev2.id}_{name.lower()}_{status}",
+                        text=status,
+                        raw_payload="{}",
+                    )
+                    s.add(inbound)
+                    await s.flush()
+                    await event_manager.upsert_rsvp(
+                        s, event=ev2, contact=contact, inbound=inbound,
+                        status=status_enum, raw_text=status,
+                        note="Will Not Bowl" if status_enum == RsvpStatus.wnbo else None,
+                    )
+                results.append(f"✅ {name} → {status.upper()}")
+            except Exception as exc:
+                errors.append(f"❌ {name}: {exc}")
+
+    reply = f"<b>Bulk RSVP done ({len(results)} added)</b>\n"
+    if results:
+        reply += "\n".join(results)
+    if errors:
+        reply += "\n\n⚠️ Errors:\n" + "\n".join(errors)
+    await update.message.reply_text(reply, parse_mode="HTML")
+
+
+@allowlist_only
 async def cmd_cleartestrsvps(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Remove all test RSVPs and test contacts from the active event (for clean re-testing)."""
     from sqlalchemy import delete
@@ -862,7 +951,8 @@ def build_app():
     app.add_handler(CommandHandler("quiet",   cmd_quiet))    # Phase 2
     app.add_handler(CommandHandler("drafts",      cmd_drafts))
     app.add_handler(CommandHandler("cancel",      cmd_cancel_outbox))
-    app.add_handler(CommandHandler("canceledit",  cmd_canceledit))    app.add_handler(CallbackQueryHandler(handle_callback,       pattern=r"^draft:"))
+    app.add_handler(CommandHandler("canceledit",  cmd_canceledit))
+    app.add_handler(CallbackQueryHandler(handle_callback,       pattern=r"^draft:"))
     app.add_handler(CallbackQueryHandler(handle_event_callback, pattern=r"^event:"))
     # Phase 3 - Event automation
     app.add_handler(CommandHandler("newevent",       cmd_newevent))
@@ -870,9 +960,9 @@ def build_app():
     app.add_handler(CommandHandler("votes",          cmd_votes))
     app.add_handler(CommandHandler("callinglist",    cmd_callinglist))
     app.add_handler(CommandHandler("closeevent",      cmd_closeevent))
-    app.add_handler(CommandHandler("groups",          cmd_groups))
-    app.add_handler(CommandHandler("testrsvp",        cmd_testrsvp))
+    app.add_handler(CommandHandler("groups",          cmd_groups))    app.add_handler(CommandHandler("testrsvp",        cmd_testrsvp))
     app.add_handler(CommandHandler("cleartestrsvps",  cmd_cleartestrsvps))
+    app.add_handler(CommandHandler("bulkrsvp",        cmd_bulkrsvp))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_reply))
 
