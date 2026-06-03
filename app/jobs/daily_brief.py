@@ -9,13 +9,14 @@ from sqlalchemy import func, select
 from app.db import engine, session_scope
 from app.logging_setup import log, setup_logging
 from app.models import AuditLog, Base, Commitment, CommitmentStatus, Draft, DraftStatus, InboundMessage, Memory, Outbox, OutboxStatus, Reminder, ReminderStatus
+from app.services.time_utils import utc_now_naive
 from app.services.telegram_notify import send_admin_message
 
 setup_logging()
 
 
 async def build_brief() -> str:
-    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    since = utc_now_naive() - timedelta(hours=24)
     async with session_scope() as s:
         audit_count = (
             await s.execute(select(func.count(AuditLog.id)).where(AuditLog.ts >= since))

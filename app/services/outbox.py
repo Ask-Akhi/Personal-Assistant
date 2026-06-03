@@ -1,7 +1,7 @@
 """Outbox helpers for delayed send, cancel, and idempotent release."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -9,11 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import Outbox, OutboxStatus
+from app.services.time_utils import as_utc_naive, utc_now_naive
 
 
 def _send_after() -> datetime:
     settings = get_settings()
-    return datetime.now(timezone.utc) + timedelta(seconds=settings.undo_window_seconds)
+    return utc_now_naive() + timedelta(seconds=settings.undo_window_seconds)
 
 
 async def queue_message(
@@ -45,7 +46,7 @@ async def cancel_message(session: AsyncSession, outbox_id: int) -> bool:
 
 
 async def due_messages(session: AsyncSession, *, now: datetime | None = None) -> list[Outbox]:
-    current = now or datetime.now(timezone.utc)
+    current = as_utc_naive(now) if now is not None else utc_now_naive()
     stmt = (
         select(Outbox)
         .where(Outbox.status == OutboxStatus.pending, Outbox.send_after <= current)

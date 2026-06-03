@@ -6,13 +6,14 @@ Also called directly from handle_inbound for inbound commitment signals.
 from __future__ import annotations
 
 import html
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Commitment, CommitmentStatus, Contact, InboundMessage, Reminder, ReminderStatus
 from app.services import audit
 from app.services.commitment_extractor import CommitmentSignal
+from app.services.time_utils import as_utc_naive, utc_now_naive
 
 
 async def persist_signals(
@@ -41,7 +42,7 @@ async def persist_signals(
             commitment_id=commitment.id,
             contact_id=contact.id,
             message=_reminder_text(contact, inbound, sig),
-            fire_at=datetime.now(timezone.utc) + timedelta(hours=4),
+            fire_at=utc_now_naive() + timedelta(hours=4),
         )
         session.add(reminder)
 
@@ -74,7 +75,7 @@ def _reminder_text(contact: Contact, inbound: InboundMessage, sig: CommitmentSig
 async def due_reminders(session: AsyncSession, *, now: datetime | None = None) -> list[Reminder]:
     """Return pending reminders whose fire_at has passed."""
     from sqlalchemy import select
-    current = now or datetime.now(timezone.utc)
+    current = as_utc_naive(now) if now is not None else utc_now_naive()
     stmt = (
         select(Reminder)
         .where(Reminder.status == ReminderStatus.pending, Reminder.fire_at <= current)
@@ -88,7 +89,7 @@ async def mark_sent(session: AsyncSession, reminder_id: int) -> None:
     reminder = await session.get(Reminder, reminder_id)
     if reminder:
         reminder.status = ReminderStatus.sent
-        reminder.sent_at = datetime.now(timezone.utc)
+        reminder.sent_at = utc_now_naive()
 
 
 async def dismiss(session: AsyncSession, reminder_id: int) -> None:

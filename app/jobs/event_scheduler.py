@@ -10,19 +10,18 @@ Flow:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-
 from sqlalchemy import select
 
 from app.db import session_scope
 from app.logging_setup import log
 from app.models import CricketEvent, EventStatus
 from app.services import event_manager
+from app.services.time_utils import utc_now_naive
 
 
 async def run_once() -> None:
     """Check and process any events that have passed their cutoff."""
-    now = datetime.now(timezone.utc)
+    now = utc_now_naive()
 
     async with session_scope() as s:
         result = await s.execute(

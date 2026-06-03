@@ -69,6 +69,10 @@ def allowlist_only(fn):
         uid = update.effective_user.id if update.effective_user else 0
         if not auth.is_allowed(uid):
             log.warning("bot.denied", user_id=uid)
+            if update.message:
+                await update.message.reply_text(
+                    f"Not authorised. Add this Telegram ID to TELEGRAM_ALLOWED_USER_IDS: {uid}"
+                )
             return
         return await fn(update, ctx)
     return wrapper
@@ -487,11 +491,11 @@ async def cmd_newevent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         new_event = CricketEvent(
             title=title,
-            event_at=event_at,
+            event_at=event_at.replace(tzinfo=None),
             venue=venue,
             group_wa_id=group_wa_id,
             cutoff_hours=cutoff_hours,
-            cutoff_at=cutoff_at,
+            cutoff_at=cutoff_at.replace(tzinfo=None),
             status=EventStatus.open,
         )
         s.add(new_event)

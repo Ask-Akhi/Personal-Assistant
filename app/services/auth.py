@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import PinSession
+from app.services.time_utils import utc_now_naive
 
 settings = get_settings()
 
@@ -19,7 +20,7 @@ def is_allowed(user_id: int) -> bool:
 async def pin_unlock(session: AsyncSession, user_id: int, pin: str) -> bool:
     if not settings.admin_pin or pin != settings.admin_pin:
         return False
-    expires = datetime.now(timezone.utc) + timedelta(minutes=settings.pin_session_minutes)
+    expires = utc_now_naive() + timedelta(minutes=settings.pin_session_minutes)
     stmt = select(PinSession).where(PinSession.user_id == user_id)
     existing = (await session.execute(stmt)).scalar_one_or_none()
     if existing:

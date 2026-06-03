@@ -1,13 +1,14 @@
 """Monthly cost cap enforcement. Call before every paid API request."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import CostLedger
+from app.services.time_utils import utc_now_naive
 
 
 class CostCapExceeded(Exception):
@@ -15,7 +16,7 @@ class CostCapExceeded(Exception):
 
 
 def _month_start_utc() -> datetime:
-    now = datetime.now(timezone.utc)
+    now = utc_now_naive()
     return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 

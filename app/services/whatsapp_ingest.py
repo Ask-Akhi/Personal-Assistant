@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Contact, InboundMessage
+from app.services.time_utils import as_utc_naive, utc_now_naive
 
 
 @dataclass(frozen=True)
@@ -128,7 +129,7 @@ async def persist_message(
         message_type=message.message_type,
         text=message.text,
         raw=message.raw,
-        received_at=message.received_at,
+        received_at=as_utc_naive(message.received_at),
     )
     session.add(inbound)
     await session.flush()
@@ -147,14 +148,14 @@ async def _upsert_contact(
     if contact:
         if message.display_name:
             contact.display_name = message.display_name
-        contact.last_inbound_at = message.received_at
+        contact.last_inbound_at = as_utc_naive(message.received_at)
         await session.flush()
         return contact
 
     contact = Contact(
         external_id=message.from_external_id,
         display_name=message.display_name,
-        last_inbound_at=message.received_at,
+        last_inbound_at=as_utc_naive(message.received_at),
     )
     session.add(contact)
     await session.flush()
@@ -177,6 +178,6 @@ def _message_text(message: dict) -> str | None:
 
 def _message_time(timestamp: object) -> datetime:
     try:
-        return datetime.fromtimestamp(int(str(timestamp)), tz=timezone.utc)
+        return as_utc_naive(datetime.fromtimestamp(int(str(timestamp)), tz=timezone.utc))
     except (TypeError, ValueError, OSError):
-        return datetime.now(timezone.utc)
+        return utc_now_naive()
