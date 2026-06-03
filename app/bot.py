@@ -613,6 +613,12 @@ async def cmd_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     uid = update.effective_user.id
     override_group = ctx.args[0].strip() if ctx.args else None
+    if override_group and override_group.startswith("/"):
+        await update.message.reply_text(
+            "Usage: /announce [whatsapp_number]\n"
+            "Send /announce by itself, then send /testrsvp commands separately."
+        )
+        return
 
     now = datetime.now(AET)
     saturday = _next_saturday(now)

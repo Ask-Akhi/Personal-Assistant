@@ -6,6 +6,8 @@ Outside that window, use approved templates (not implemented yet).
 """
 from __future__ import annotations
 
+import re
+
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -34,6 +36,11 @@ async def send_text(to: str, text: str) -> str:
         raise WhatsAppSendError(
             "WhatsApp Cloud API Graph /messages cannot send to group IDs (@g.us). "
             "Use the manual copy text, or wire a WhatsApp Web/Baileys-style group sender."
+        )
+    if not re.fullmatch(r"\+?\d{8,15}", to):
+        raise WhatsAppSendError(
+            f"Invalid WhatsApp Cloud API recipient '{to}'. Use an E.164 phone number "
+            "without spaces, not another Telegram command."
         )
 
     url = f"{WA_API_BASE}/{settings.whatsapp_phone_number_id}/messages"
