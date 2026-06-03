@@ -819,7 +819,8 @@ async def cmd_bulkrsvp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not status:
             errors.append(f"Unknown status '{status_raw}'")
             continue
-        names = [n.strip() for n in names_raw.split(",") if n.strip()]        for name in names:
+        names = [n.strip() for n in names_raw.split(",") if n.strip()]
+        for name in names:
             try:
                 from app.models import RsvpStatus, InboundMessage
                 status_enum = RsvpStatus[status]
