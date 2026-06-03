@@ -210,12 +210,16 @@ async def wa_inbound(request: Request):
         if inbound is not None:
             await telegram_notify.send_admin_message(_mirror_text(contact, inbound))
 
-            # Phase 2/3: check if this is a cricket event RSVP first
+            # Phase 3: auto-detect event announcement (runs on every message)
+            async with session_scope() as s:
+                await event_manager.auto_detect_and_create_event(s, contact, inbound)
+
+            # Phase 2/3: check if this is an RSVP for the active event
             async with session_scope() as s:
                 is_rsvp = await event_manager.handle_possible_rsvp(s, contact, inbound)
 
             if not is_rsvp:
-                # Normal message — policy check + AI draft + Telegram approval card
+                # Normal message -- policy check + AI draft + Telegram approval card
                 await draft_manager.handle_inbound(contact, inbound)
 
     return {

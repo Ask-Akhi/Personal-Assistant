@@ -1,16 +1,22 @@
 """Cricket/Sports Event Manager — Phase 2/3/5.
 
 Responsibilities:
+- Auto-detect event announcements from group messages (no manual command needed)
 - RSVP classification (English + Hinglish + emoji)
 - WNBO (Will Not Bowl) tracking
 - Calling list builder
 - Event creation helpers
 - Cutoff timer trigger (called from scheduler)
+
+## Zero-effort flow:
+  You post in WA group: "T20 this Saturday 6:30am, Oval Ground - who's in?"
+  PI detects it -> creates CricketEvent automatically -> starts RSVP collection
+  After 36hrs -> builds calling list -> sends to Telegram for 30s undo -> auto-posts to group
 """
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import select
@@ -269,9 +275,234 @@ async def _notify_rsvp(
     async with session_scope() as s:
         rows = await get_rsvps(s, event.id)
     going_count = sum(1 for r, _ in rows if r.status in (RsvpStatus.yes, RsvpStatus.wnbo))
-
     await send_admin_message(
         f"{icon} <b>{name}</b> → <code>{rsvp.status.value.upper()}</code>{wnbo_tag}\n"
         f"Event: <b>{event.title}</b>\n"
         f"Going so far: <b>{going_count}</b>"
     )
+
+
+# ── Auto-detect event announcements from group messages ──────────────
+#
+# Triggers on messages YOU send to the group that look like:
+#   "T20 this Saturday 6:30am at Oval - who's in?"
+#   "Cricket Sunday 7am Shenley, reply if coming"
+#   "Football tmrw 6pm - who's playing?"
+#
+# No manual command needed. PI watches your outgoing group messages.
+
+_EVENT_SPORT_KEYWORDS = [
+    "cricket", "t20", "football", "soccer", "futsal",
+    "badminton", "tennis", "basketball", "volleyball",
+]
+
+_EVENT_TRIGGER_PHRASES = [
+    r"who.?s in", r"who.?s (coming|playing|joining|there)",
+    r"reply if", r"let me know", r"confirm",
+    r"are you (in|coming|playing)",
+    r"game (on|this|tmrw|tomorrow|sunday|saturday|friday)",
+    r"match (this|tmrw|tomorrow|on)",
+    r"anyone (in|coming|up for|interested)",
+]
+
+_TIME_PATTERNS = [
+    # "6:30am", "6:30 am", "6am", "6 am", "18:30"
+    r"\b(\d{1,2}:\d{2}\s*(?:am|pm))\b",
+    r"\b(\d{1,2}\s*(?:am|pm))\b",
+    r"\b(\d{2}:\d{2})\b",
+]
+
+_DAY_PATTERNS = [
+    r"\b(today|tmrw|tomorrow)\b",
+    r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    r"\b(this\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b",
+    r"\b(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b",
+]
+
+_VENUE_PATTERNS = [
+    r"\bat\s+([\w\s]{3,30}?)(?:\s*[-,]|\s+who|\s+reply|\s*$)",
+    r"\b(?:at|@)\s+([\w\s]{3,25}ground|[\w\s]{3,25}park|[\w\s]{3,25}court|[\w\s]{3,25}field|[\w\s]{3,25}club)\b",
+]
+
+
+def _detect_event_announcement(text: str) -> dict | None:
+    """
+    Returns a dict with detected fields if this looks like an event announcement,
+    or None if it doesn't.
+    """
+    lower = text.lower()
+
+    # Must mention a sport
+    sport = next((s for s in _EVENT_SPORT_KEYWORDS if s in lower), None)
+    if not sport:
+        return None
+
+    # Must have a trigger phrase (who's in, reply if coming, etc.)
+    has_trigger = any(re.search(p, lower) for p in _EVENT_TRIGGER_PHRASES)
+    if not has_trigger:
+        return None
+
+    # Try to extract time
+    time_str = None
+    for pat in _TIME_PATTERNS:
+        m = re.search(pat, lower)
+        if m:
+            time_str = m.group(1).strip()
+            break
+
+    # Try to extract day
+    day_str = None
+    for pat in _DAY_PATTERNS:
+        m = re.search(pat, lower)
+        if m:
+            day_str = m.group(1).strip()
+            break
+
+    # Try to extract venue
+    venue = None
+    for pat in _VENUE_PATTERNS:
+        m = re.search(pat, lower)
+        if m:
+            venue = m.group(1).strip().title()
+            break
+
+    return {
+        "sport": sport.upper(),
+        "time_str": time_str,
+        "day_str": day_str,
+        "venue": venue,
+    }
+
+
+def _resolve_event_datetime(day_str: str | None, time_str: str | None) -> datetime | None:
+    """Best-effort parse of day+time into a UTC datetime."""
+    import re as _re
+    from datetime import date
+    import pytz
+
+    now_ist = datetime.now(pytz.timezone("Asia/Kolkata"))
+    today = now_ist.date()
+
+    # Resolve day
+    target_date = today
+    if day_str:
+        day_str = day_str.lower().strip()
+        if day_str in ("today",):
+            target_date = today
+        elif day_str in ("tmrw", "tomorrow"):
+            target_date = today + timedelta(days=1)
+        else:
+            # Named weekday
+            weekdays = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
+            for i, wd in enumerate(weekdays):
+                if wd in day_str:
+                    days_ahead = (i - today.weekday()) % 7
+                    if days_ahead == 0:
+                        days_ahead = 7  # next occurrence
+                    target_date = today + timedelta(days=days_ahead)
+                    break
+
+    # Resolve time
+    hour, minute = 6, 30  # sensible default for morning cricket
+    if time_str:
+        time_str = time_str.lower().replace(" ", "")
+        m = _re.match(r"(\d{1,2}):(\d{2})\s*(am|pm)?", time_str)
+        if m:
+            hour = int(m.group(1))
+            minute = int(m.group(2))
+            if m.group(3) == "pm" and hour < 12:
+                hour += 12
+            elif m.group(3) == "am" and hour == 12:
+                hour = 0
+        else:
+            m = _re.match(r"(\d{1,2})\s*(am|pm)", time_str)
+            if m:
+                hour = int(m.group(1))
+                if m.group(2) == "pm" and hour < 12:
+                    hour += 12
+                elif m.group(2) == "am" and hour == 12:
+                    hour = 0
+
+    ist = pytz.timezone("Asia/Kolkata")
+    naive_dt = datetime(target_date.year, target_date.month, target_date.day, hour, minute)
+    return ist.localize(naive_dt).astimezone(pytz.utc).replace(tzinfo=timezone.utc)
+
+
+async def auto_detect_and_create_event(
+    session: AsyncSession,
+    contact: Contact,
+    inbound: InboundMessage,
+) -> CricketEvent | None:
+    """
+    Called on every inbound message.
+    Detects event announcements and auto-creates a CricketEvent.
+    Group WA ID is extracted from the raw webhook payload.
+    Returns the created event or None.
+    """
+    if not inbound.text:
+        return None
+
+    # Don't create if there's already an open event
+    existing = await get_active_event(session)
+    if existing:
+        return None
+
+    detected = _detect_event_announcement(inbound.text)
+    if not detected:
+        return None
+
+    event_dt = _resolve_event_datetime(detected["day_str"], detected["time_str"])
+    if not event_dt:
+        return None
+
+    # Extract group WA ID from raw webhook payload (group messages have a "from" at group level)
+    raw = inbound.raw or {}
+    group_wa_id = (
+        raw.get("group_id")
+        or (raw.get("context") or {}).get("group_id")
+        or inbound.from_external_id  # fallback: treat sender as target for direct groups
+    )
+
+    # Cutoff = 36 hours before event
+    cutoff_at = event_dt - timedelta(hours=36)
+    # If cutoff already passed, use 2 hours from now
+    now = datetime.now(timezone.utc)
+    if cutoff_at < now:
+        cutoff_at = now + timedelta(hours=2)
+
+    title = f"{detected['sport']} {detected['day_str'] or ''}".strip()
+
+    event = CricketEvent(
+        title=title,
+        event_at=event_dt.replace(tzinfo=None),  # store naive UTC
+        venue=detected["venue"],
+        group_wa_id=group_wa_id,
+        cutoff_hours=36.0,
+        cutoff_at=cutoff_at.replace(tzinfo=None),
+    )
+    session.add(event)
+    await session.flush()
+
+    log.info(
+        "event_manager.auto_created",
+        event_id=event.id,
+        title=title,
+        event_at=str(event_dt),
+        cutoff_at=str(cutoff_at),
+        venue=detected["venue"],
+    )
+
+    # Notify you on Telegram
+    from app.services.telegram_notify import send_admin_message
+    venue_line = f"\nVenue: {detected['venue']}" if detected["venue"] else ""
+    await send_admin_message(
+        f"🏏 <b>Event auto-detected!</b>\n"
+        f"Title: <b>{title}</b>\n"
+        f"Date/Time: <b>{event_dt.strftime('%a %b %-d at %-I:%M %p')} IST</b>"
+        f"{venue_line}\n"
+        f"Cutoff: <b>{cutoff_at.strftime('%a %b %-d %-I:%M %p')} IST</b>\n\n"
+        f"Watching for RSVPs in the group automatically.\n"
+        f"Use /votes to check anytime."
+    )
+
+    return event
