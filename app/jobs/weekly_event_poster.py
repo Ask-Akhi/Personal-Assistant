@@ -24,7 +24,7 @@ WEEKLY_VENUE    = "Coolong Reserve"
 WEEKLY_GROUP    = "CHCC Members"  # Castle Hill Cricket Community
 WEEKLY_START    = (6, 30)   # 6:30 AM
 WEEKLY_END      = (10, 30)  # 10:30 AM
-CUTOFF_HOURS    = 36.0      # close RSVP 36 hrs before event
+CUTOFF_HOURS    = 26.0      # close RSVP 26 hrs before event
 
 
 def _next_tuesday_7pm_aet() -> datetime:
@@ -158,6 +158,19 @@ async def _create_and_announce(event_at: datetime) -> None:
 async def run() -> None:
     """Main loop: sleep until next Tuesday 7 PM AET, then post."""
     log.info("weekly_poster.started")
+
+    # --- Catch-up on startup: if today is Tuesday and we haven't posted yet, fire now ---
+    now = datetime.now(AET)
+    if now.weekday() == 1:  # Tuesday
+        saturday = _next_saturday(now)
+        if not await _already_exists_for(saturday):
+            log.info("weekly_poster.catchup_fire", reason="Tuesday startup, no event found yet")
+            try:
+                await _create_and_announce(saturday)
+            except Exception as exc:
+                log.error("weekly_poster.failed", error=str(exc))
+            await asyncio.sleep(60)
+
     while True:
         fire_at = _next_tuesday_7pm_aet()
         now = datetime.now(AET)

@@ -12,9 +12,9 @@ Commands (Phase 1 + 2 + 3):
   /quiet                  - show quiet-hours status
   /drafts [n]             - list pending drafts
   /cancel <outbox_id>     - cancel outbox item inside undo window
-
   /newevent <title> | <YYYY-MM-DD HH:MM> | [venue] | [group_wa_id] | [cutoff_hours]
                           - create a new cricket/sports event
+  /announce [group_wa_id] - post this Saturday's event NOW (creates if needed, re-sends if exists)
   /votes                  - show live RSVPs for the active event
   /callinglist            - preview + manually send calling list
   /closeevent             - cancel the active event without sending
@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 from functools import wraps
 
+from datetime import datetime
 from sqlalchemy import select
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -581,6 +582,107 @@ async def cmd_callinglist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @allowlist_only
+async def cmd_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    Manually trigger this week's event announcement right now.
+    Usage: /announce [group_wa_id]
+    If a group_wa_id is given, it overrides auto-discovery.
+    The event is created for the coming Saturday 6:30 AM AET.
+    If an event already exists, the announcement is re-sent without duplicating the DB row.
+    """
+    from app.jobs.weekly_event_poster import (
+        _next_saturday, _already_exists_for, _create_and_announce, AET, CUTOFF_HOURS
+    )
+    from app.services.group_registry import get_group_for_task
+    from app.services import wa_sender
+    from app.services.telegram_notify import send_admin_message
+    import pytz
+
+    uid = update.effective_user.id
+    override_group = ctx.args[0].strip() if ctx.args else None
+
+    now = datetime.now(AET)
+    saturday = _next_saturday(now)
+
+    # If already exists, just re-post the announcement (don't create duplicate)
+    async with session_scope() as s:
+        ev = await event_manager.get_active_event(s)
+        if ev is None:
+            # check if one exists (even closed) for this Saturday
+            from app.jobs.weekly_event_poster import _already_exists_for as _ae
+            already = await _ae(saturday)
+        else:
+            already = True
+
+    if not already:
+        await update.message.reply_text("⏳ Creating event and posting announcement...")
+        try:
+            await _create_and_announce(saturday)
+            await update.message.reply_text("✅ Event created and announcement posted!")
+        except Exception as exc:
+            await update.message.reply_text(f"⚠️ Error: `{str(exc)[:300]}`", parse_mode="Markdown")
+        return
+
+    # Event already exists — re-send announcement only
+    await update.message.reply_text("ℹ️ Event already exists. Re-sending announcement to group...")
+
+    async with session_scope() as s:
+        ev = await event_manager.get_active_event(s)
+
+    if not ev:
+        await update.message.reply_text("⚠️ Could not find active event. Try /newevent instead.")
+        return
+
+    # Resolve group ID
+    group_id = override_group
+    if not group_id:
+        async with session_scope() as s:
+            group_id = await get_group_for_task(s, "weekly_cricket")
+    if not group_id:
+        group_id = get_settings().whatsapp_group_id or None
+    if not group_id and ev.group_wa_id:
+        group_id = ev.group_wa_id
+
+    import pytz as _pytz
+    AET_tz = _pytz.timezone("Australia/Sydney")
+    ev_aet = ev.event_at.replace(tzinfo=_pytz.utc).astimezone(AET_tz)
+    day_str = ev_aet.strftime("%A, %d %b %Y")
+    start_str = ev_aet.strftime("%-I:%M %p")
+    end_str = ev_aet.replace(hour=10, minute=30).strftime("%-I:%M %p")
+    cutoff_aet = ev.cutoff_at.replace(tzinfo=_pytz.utc).astimezone(AET_tz) if ev.cutoff_at else None
+    cutoff_str = cutoff_aet.strftime("%a %d %b, %-I:%M %p AET") if cutoff_aet else "N/A"
+
+    announcement = (
+        f"Hi CHCC Members! \U0001f44b\n\n"
+        f"\U0001f3cf *T20 Cricket - This Saturday!*\n\n"
+        f"\U0001f4c5 {day_str}\n"
+        f"\u23f0 {start_str} - {end_str}\n"
+        f"\U0001f4cd Coolong Reserve\n\n"
+        f"Please reply:\n"
+        f"\u2705 *YES* - Coming\n"
+        f"\U0001f3cf *WNBO* - Coming but Will Not Bowl\n"
+        f"\u274c *NO* - Can't make it\n\n"
+        f"\U0001f4cb Calling list will be shared by {cutoff_str}. See you on the field! \U0001f3c6"
+    )
+
+    if group_id:
+        try:
+            await wa_sender.send_text(group_id, announcement)
+            await update.message.reply_text(f"✅ Announcement re-sent to group `{group_id}`!", parse_mode="Markdown")
+        except Exception as exc:
+            await update.message.reply_text(
+                f"⚠️ WA send failed: `{str(exc)[:200]}`\n\nCopy manually:\n```\n{announcement}\n```",
+                parse_mode="Markdown"
+            )
+    else:
+        await update.message.reply_text(
+            f"⚠️ No WA group ID found. Copy and paste manually:\n\n```\n{announcement}\n```\n\n"
+            f"Or use: `/announce <group_wa_id>` to set it.",
+            parse_mode="Markdown"
+        )
+
+
+@allowlist_only
 async def cmd_closeevent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Manually close the active event without sending the calling list."""
     uid = update.effective_user.id
@@ -643,8 +745,8 @@ def build_app():
     app.add_handler(CommandHandler("cancel",      cmd_cancel_outbox))
     app.add_handler(CommandHandler("canceledit",  cmd_canceledit))
     app.add_handler(CallbackQueryHandler(handle_callback,       pattern=r"^draft:"))
-    app.add_handler(CallbackQueryHandler(handle_event_callback, pattern=r"^event:"))    # Phase 2/3 - Event automation
-    app.add_handler(CommandHandler("newevent",    cmd_newevent))
+    app.add_handler(CallbackQueryHandler(handle_event_callback, pattern=r"^event:"))    # Phase 2/3 - Event automation    app.add_handler(CommandHandler("newevent",    cmd_newevent))
+    app.add_handler(CommandHandler("announce",    cmd_announce))
     app.add_handler(CommandHandler("votes",       cmd_votes))
     app.add_handler(CommandHandler("callinglist", cmd_callinglist))
     app.add_handler(CommandHandler("closeevent",  cmd_closeevent))
