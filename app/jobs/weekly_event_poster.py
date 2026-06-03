@@ -24,7 +24,7 @@ WEEKLY_VENUE    = "Coolong Reserve"
 WEEKLY_GROUP    = "CHCC Members"  # Castle Hill Cricket Community
 WEEKLY_START    = (6, 30)   # 6:30 AM
 WEEKLY_END      = (10, 30)  # 10:30 AM
-CUTOFF_HOURS    = 26.0      # close RSVP 26 hrs before event
+CUTOFF_HOURS    = 36.0      # close RSVP 36 hrs before event
 
 
 def _next_tuesday_7pm_aet() -> datetime:

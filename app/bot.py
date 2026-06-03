@@ -683,6 +683,125 @@ async def cmd_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @allowlist_only
+async def cmd_testrsvp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    Inject a test RSVP into the active event from Telegram.
+    Usage: /testrsvp <Name> <yes|no|wnbo|maybe>
+    Example: /testrsvp "Akhi" yes
+             /testrsvp "Raj" wnbo
+             /testrsvp "Sam" no
+    """
+    from app.models import RsvpStatus
+
+    if len(ctx.args) < 2:
+        await update.message.reply_text(
+            "Usage: `/testrsvp <Name> <yes|no|wnbo|maybe>`\n"
+            "Example: `/testrsvp Akhi yes`",
+            parse_mode="Markdown"
+        )
+        return
+
+    name = ctx.args[0].strip()
+    vote_raw = ctx.args[1].strip().lower()
+
+    status_map = {
+        "yes": RsvpStatus.yes,
+        "y": RsvpStatus.yes,
+        "no": RsvpStatus.no,
+        "n": RsvpStatus.no,
+        "wnbo": RsvpStatus.wnbo,
+        "maybe": RsvpStatus.maybe,
+        "m": RsvpStatus.maybe,
+    }
+    status = status_map.get(vote_raw)
+    if not status:
+        await update.message.reply_text(
+            f"❌ Unknown vote `{vote_raw}`. Use: yes / no / wnbo / maybe",
+            parse_mode="Markdown"
+        )
+        return
+
+    async with session_scope() as s:
+        ev = await event_manager.get_active_event(s)
+        if not ev:
+            await update.message.reply_text("❌ No active event. Run `/announce` first.", parse_mode="Markdown")
+            return
+
+        # Get or create a test contact
+        contact = (await s.execute(
+            select(Contact).where(Contact.external_id == f"test_{name.lower()}")
+        )).scalar_one_or_none()
+        if not contact:
+            contact = Contact(
+                external_id=f"test_{name.lower()}",
+                display_name=name,
+                platform="test",
+            )
+            s.add(contact)
+            await s.flush()
+
+        # Create a fake InboundMessage
+        from app.models import InboundMessage
+        inbound = InboundMessage(
+            contact_id=contact.id,
+            platform="test",
+            external_msg_id=f"test_{ev.id}_{name}_{vote_raw}",
+            text=vote_raw,
+            raw_payload="{}",
+        )
+        s.add(inbound)
+        await s.flush()
+
+        rsvp = await event_manager.upsert_rsvp(
+            s,
+            event=ev,
+            contact=contact,
+            inbound=inbound,
+            status=status,
+            raw_text=vote_raw,
+            note="Will Not Bowl" if status == RsvpStatus.wnbo else None,
+        )
+        rsvp_id = rsvp.id
+
+    emoji = {"yes": "✅", "no": "❌", "wnbo": "🏏", "maybe": "🤔"}.get(vote_raw, "📝")
+    await update.message.reply_text(
+        f"{emoji} Test RSVP recorded!\n"
+        f"*{name}* → `{vote_raw.upper()}`\n\n"
+        f"Run `/votes` to see all RSVPs or `/callinglist` to preview.",
+        parse_mode="Markdown"
+    )
+
+
+@allowlist_only
+async def cmd_cleartestrsvps(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Remove all test RSVPs and test contacts from the active event (for clean re-testing)."""
+    from sqlalchemy import delete
+    from app.models import InboundMessage, EventRsvp
+
+    async with session_scope() as s:
+        ev = await event_manager.get_active_event(s)
+        if not ev:
+            await update.message.reply_text("No active event.")
+            return
+
+        # Find test contacts
+        test_contacts = (await s.execute(
+            select(Contact).where(Contact.platform == "test")
+        )).scalars().all()
+
+        count = 0
+        for tc in test_contacts:
+            rsvps = (await s.execute(
+                select(EventRsvp).where(EventRsvp.contact_id == tc.id, EventRsvp.event_id == ev.id)
+            )).scalars().all()
+            for r in rsvps:
+                await s.delete(r)
+                count += 1
+
+    await update.message.reply_text(f"🗑️ Cleared {count} test RSVP(s). Run `/testrsvp` to add new ones.")
+
+
+@allowlist_only
 async def cmd_closeevent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Manually close the active event without sending the calling list."""
     uid = update.effective_user.id
@@ -747,10 +866,11 @@ def build_app():
     app.add_handler(CallbackQueryHandler(handle_callback,       pattern=r"^draft:"))
     app.add_handler(CallbackQueryHandler(handle_event_callback, pattern=r"^event:"))    # Phase 2/3 - Event automation    app.add_handler(CommandHandler("newevent",    cmd_newevent))
     app.add_handler(CommandHandler("announce",    cmd_announce))
-    app.add_handler(CommandHandler("votes",       cmd_votes))
-    app.add_handler(CommandHandler("callinglist", cmd_callinglist))
-    app.add_handler(CommandHandler("closeevent",  cmd_closeevent))
-    app.add_handler(CommandHandler("groups",      cmd_groups))
+    app.add_handler(CommandHandler("votes",       cmd_votes))    app.add_handler(CommandHandler("callinglist",     cmd_callinglist))
+    app.add_handler(CommandHandler("closeevent",      cmd_closeevent))
+    app.add_handler(CommandHandler("groups",          cmd_groups))
+    app.add_handler(CommandHandler("testrsvp",        cmd_testrsvp))
+    app.add_handler(CommandHandler("cleartestrsvps",  cmd_cleartestrsvps))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_reply))
 
