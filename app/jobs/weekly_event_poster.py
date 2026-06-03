@@ -52,10 +52,17 @@ def _next_saturday(reference: datetime) -> datetime:
 async def _already_exists_for(event_at: datetime) -> bool:
     """Return True if an open/closed event already exists for this Saturday."""
     from sqlalchemy import select
+    event_at_utc = as_utc_naive(event_at)
+    lo = event_at_utc - timedelta(hours=12)
+    hi = event_at_utc + timedelta(hours=12)
+    log.info(
+        "weekly_poster.duplicate_check",
+        event_at=str(event_at_utc),
+        lo=str(lo),
+        hi=str(hi),
+    )
     async with session_scope() as s:
         # Check within +/- 12 hours of the target datetime
-        lo = as_utc_naive(event_at - timedelta(hours=12))
-        hi = as_utc_naive(event_at + timedelta(hours=12))
         row = (await s.execute(
             select(CricketEvent).where(
                 CricketEvent.event_at >= lo,
