@@ -21,6 +21,8 @@ class NormalizedWhatsAppMessage:
     text: str | None
     received_at: datetime
     raw: dict
+    group_id: str | None = None       # set if message came from a WA group
+    group_name: str | None = None     # group display name if available
 
 
 def signature_valid(*, body: bytes, signature_header: str | None, app_secret: str) -> bool:
@@ -45,6 +47,13 @@ def extract_messages(payload: dict) -> list[NormalizedWhatsAppMessage]:
                 contact.get("wa_id"): (contact.get("profile") or {}).get("name")
                 for contact in value.get("contacts") or []
             }
+            # Extract group metadata if present
+            metadata = value.get("metadata") or {}
+            group_name = metadata.get("display_phone_number")  # fallback
+            # Real group name comes from conversation subject (not always available)
+            conv = value.get("conversation") or {}
+            group_name = conv.get("origin", {}).get("type") or group_name
+
             for message in value.get("messages") or []:
                 from_external_id = str(message.get("from") or "")
                 if not from_external_id:
@@ -52,6 +61,22 @@ def extract_messages(payload: dict) -> list[NormalizedWhatsAppMessage]:
                 message_id = str(message.get("id") or "")
                 if not message_id:
                     continue
+
+                # Detect group: group messages have a "context" with group metadata
+                # or the "to" field in value.metadata is a group ID
+                raw_group_id: str | None = None
+                raw_group_name: str | None = None
+                msg_context = message.get("context") or {}
+                # If metadata phone_number_id is a group, it ends with @g.us
+                meta_phone = metadata.get("phone_number_id", "")
+                if from_external_id.endswith("@g.us"):
+                    raw_group_id = from_external_id
+                elif msg_context.get("from", "").endswith("@g.us"):
+                    raw_group_id = msg_context["from"]
+                # Try to get group name from referral or metadata
+                referral = message.get("referral") or {}
+                raw_group_name = referral.get("source_id") or group_name
+
                 results.append(
                     NormalizedWhatsAppMessage(
                         external_id=message_id,
@@ -61,6 +86,8 @@ def extract_messages(payload: dict) -> list[NormalizedWhatsAppMessage]:
                         text=_message_text(message),
                         received_at=_message_time(message.get("timestamp")),
                         raw=message,
+                        group_id=raw_group_id,
+                        group_name=raw_group_name,
                     )
                 )
     return results
@@ -70,7 +97,18 @@ async def persist_message(
     session: AsyncSession,
     message: NormalizedWhatsAppMessage,
 ) -> tuple[Contact, InboundMessage | None]:
+    from app.services.group_registry import auto_register_group
+
     contact = await _upsert_contact(session, message)
+
+    # Auto-register group if this is a group message
+    if message.group_id:
+        await auto_register_group(
+            session,
+            raw_message=message.raw,
+            group_name=message.group_name,
+        )
+
     existing = (
         await session.execute(
             select(InboundMessage).where(

@@ -74,7 +74,13 @@ async def _create_and_announce(event_at: datetime) -> None:
     cutoff_at_utc = cutoff_at.astimezone(pytz.utc).replace(tzinfo=None)
     event_at_utc  = event_at.astimezone(pytz.utc).replace(tzinfo=None)
 
-    group_id = settings.whatsapp_group_id
+    # Auto-lookup group ID from registry (no manual config needed)
+    from app.services.group_registry import get_group_for_task
+    async with session_scope() as s:
+        group_id = await get_group_for_task(s, "weekly_cricket")
+    # Fallback to env var if registry has nothing yet
+    if not group_id:
+        group_id = settings.whatsapp_group_id or None
 
     async with session_scope() as s:
         event = CricketEvent(

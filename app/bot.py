@@ -601,6 +601,25 @@ async def _ensure_schema():
         await conn.run_sync(Base.metadata.create_all)
 
 
+@allowlist_only
+async def cmd_groups(update: Update, _ctx):
+    """List all auto-discovered WhatsApp groups."""
+    from app.services.group_registry import list_groups
+    async with session_scope() as s:
+        groups = await list_groups(s)
+    if not groups:
+        await update.message.reply_text(
+            "No WhatsApp groups discovered yet.\n"
+            "Send any message from your WA group and PI will auto-register it."
+        )
+        return
+    lines = ["<b>Registered WhatsApp Groups</b>\n"]
+    for g in groups:
+        task_tag = f"  [{g['task']}]" if g["task"] != "unknown" else "  [no task]"
+        lines.append(f"<b>{g['name']}</b>{task_tag}\n<code>{g['group_id']}</code>\n")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 def build_app():
     """Build and return the PTB Application (for embedding in main.py lifespan)."""
     if not settings.telegram_bot_token:
@@ -624,13 +643,12 @@ def build_app():
     app.add_handler(CommandHandler("cancel",      cmd_cancel_outbox))
     app.add_handler(CommandHandler("canceledit",  cmd_canceledit))
     app.add_handler(CallbackQueryHandler(handle_callback,       pattern=r"^draft:"))
-    app.add_handler(CallbackQueryHandler(handle_event_callback, pattern=r"^event:"))
-
-    # Phase 2/3 - Event automation
+    app.add_handler(CallbackQueryHandler(handle_event_callback, pattern=r"^event:"))    # Phase 2/3 - Event automation
     app.add_handler(CommandHandler("newevent",    cmd_newevent))
     app.add_handler(CommandHandler("votes",       cmd_votes))
     app.add_handler(CommandHandler("callinglist", cmd_callinglist))
     app.add_handler(CommandHandler("closeevent",  cmd_closeevent))
+    app.add_handler(CommandHandler("groups",      cmd_groups))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_reply))
 
