@@ -29,6 +29,7 @@ _background_tasks: list[asyncio.Task] = []
 
 async def _run_bot():
     """Run Telegram bot in background (polling mode)."""
+    bot_app = None
     try:
         from app.bot import build_app
         bot_app = build_app()
@@ -40,9 +41,13 @@ async def _run_bot():
         while True:
             await asyncio.sleep(3600)
     except asyncio.CancelledError:
-        await bot_app.updater.stop()
-        await bot_app.stop()
-        await bot_app.shutdown()
+        if bot_app is not None:
+            await bot_app.updater.stop()
+            await bot_app.stop()
+            await bot_app.shutdown()
+        raise
+    except Exception as exc:
+        log.error("bot.crashed", error=str(exc), exc_info=True)
 
 
 async def _run_outbox_worker():

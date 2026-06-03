@@ -30,7 +30,9 @@ class Settings(BaseSettings):
     # Quiet hours (local time, 24h)
     quiet_hours_start: int = 22
     quiet_hours_end: int = 8
-    undo_window_seconds: int = 30    # Cost caps (USD/month)
+    undo_window_seconds: int = 30
+
+    # Cost caps (USD/month)
     cost_cap_anthropic: float = 20.0
     cost_cap_openai: float = 10.0
     cost_cap_elevenlabs: float = 10.0

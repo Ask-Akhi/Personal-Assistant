@@ -949,7 +949,8 @@ def build_app():
     app.add_handler(CommandHandler("notes",   cmd_notes))
     app.add_handler(CommandHandler("memory",  cmd_memory))
     app.add_handler(CommandHandler("audit",   cmd_audit))
-    app.add_handler(CommandHandler("inbox",   cmd_inbox))    app.add_handler(CommandHandler("quiet",   cmd_quiet))
+    app.add_handler(CommandHandler("inbox",   cmd_inbox))
+    app.add_handler(CommandHandler("quiet",   cmd_quiet))
     # Phase 2
     app.add_handler(CommandHandler("drafts",      cmd_drafts))
     app.add_handler(CommandHandler("cancel",      cmd_cancel_outbox))
