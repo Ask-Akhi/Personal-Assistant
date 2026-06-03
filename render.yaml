@@ -1,4 +1,4 @@
-# Render blueprint — Phase 2
+# Render blueprint — PI Assistant
 # https://render.com/docs/blueprint-spec
 services:
   - type: web
@@ -16,6 +16,7 @@ services:
           name: assistant-db
           property: connectionString
       - fromGroup: assistant-secrets
+
   - type: worker
     name: assistant-bot
     runtime: python
@@ -30,6 +31,7 @@ services:
           name: assistant-db
           property: connectionString
       - fromGroup: assistant-secrets
+
   - type: worker
     name: assistant-outbox
     runtime: python
@@ -44,6 +46,7 @@ services:
           name: assistant-db
           property: connectionString
       - fromGroup: assistant-secrets
+
   - type: worker
     name: assistant-reminders
     runtime: python
@@ -59,14 +62,15 @@ services:
           property: connectionString
       - fromGroup: assistant-secrets
 
-  # Cron jobs only ENQUEUE work. They do not touch persistent disks.
   - type: cron
     name: daily-brief
     runtime: python
-    schedule: "30 2 * * *"  # 08:00 IST = 02:30 UTC
+    schedule: "30 2 * * *"
     buildCommand: pip install -r requirements.txt
     startCommand: python -m app.jobs.daily_brief
     envVars:
+      - key: APP_ENV
+        value: prod
       - key: DATABASE_URL
         fromDatabase:
           name: assistant-db
@@ -75,7 +79,7 @@ services:
 
 databases:
   - name: assistant-db
-    plan: starter
+    plan: free
     databaseName: assistant
     user: assistant
 
@@ -85,7 +89,8 @@ envVarGroups:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_ALLOWED_USER_IDS
-        sync: false      - key: ADMIN_PIN
+        sync: false
+      - key: ADMIN_PIN
         sync: false
       - key: WHATSAPP_VERIFY_TOKEN
         sync: false
@@ -95,22 +100,19 @@ envVarGroups:
         sync: false
       - key: WHATSAPP_PHONE_NUMBER_ID
         sync: false
-      - key: TIMEZONE
-        value: Asia/Kolkata      - key: LLM_PROVIDER
-        value: gemini
       - key: GEMINI_API_KEY
         sync: false
       - key: GROQ_API_KEY
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: TIMEZONE
+        value: Asia/Kolkata
       - key: QUIET_HOURS_START
         value: "22"
       - key: QUIET_HOURS_END
         value: "8"
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: GROQ_API_KEY
-        sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
+      - key: TELEGRAM_MIRROR_ENABLED
+        value: "true"
