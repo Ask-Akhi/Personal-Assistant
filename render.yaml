@@ -6,13 +6,14 @@ services:
     name: assistant-api
     runtime: python
     plan: free
-    pythonVersion: "3.12.0"
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /healthz
     envVars:
       - key: APP_ENV
         value: production
+      - key: PYTHON_VERSION
+        value: "3.12.0"
       - key: DATABASE_URL
         fromDatabase:
           name: assistant-db
@@ -31,11 +32,7 @@ services:
       - key: WHATSAPP_GROUP_SENDER_TOKEN
         sync: false
       - key: WA_AUTH_DIR
-        value: /data/auth
-    disks:
-      - name: whatsapp-auth
-        mountPath: /data
-        sizeGB: 1
+        value: ./auth
 
 databases:
   - name: assistant-db

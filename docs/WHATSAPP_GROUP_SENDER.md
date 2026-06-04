@@ -31,9 +31,10 @@ Authorization: Bearer <WHATSAPP_GROUP_SENDER_TOKEN>
 
 ## Render Wiring
 
-Deploy this folder as a separate Node web service. Persist `WA_AUTH_DIR` with a
-disk if your host supports it; otherwise you will need to scan a new QR after
-service restarts.
+Deploy this folder as a separate Node web service. On Render free web services,
+the filesystem is ephemeral, so you will need to scan a new QR after restarts
+or redeploys. If you later move the sidecar to a paid plan, attach a persistent
+disk and point `WA_AUTH_DIR` into that disk.
 
 Set these env vars on the Python assistant service:
 
