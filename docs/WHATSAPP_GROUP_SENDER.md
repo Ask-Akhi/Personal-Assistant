@@ -18,8 +18,10 @@ to your target groups.
 
 Useful endpoints:
 
+- `GET /` shows a browser-friendly QR page.
 - `GET /healthz` checks whether WhatsApp is connected.
 - `GET /qr` returns the current QR string if one is waiting to be scanned.
+- `GET /qr.svg` returns the QR as an SVG image.
 - `GET /groups` lists groups visible to the logged-in WhatsApp account.
 - `POST /send` sends `{ "group_id": "120...@g.us", "text": "message" }`.
 

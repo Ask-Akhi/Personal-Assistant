@@ -1,5 +1,6 @@
 const express = require("express");
 const pino = require("pino");
+const QRCode = require("qrcode");
 const qrcode = require("qrcode-terminal");
 
 const {
@@ -108,6 +109,12 @@ app.get("/healthz", (_req, res) => {
   });
 });
 
+app.get("/", async (_req, res) => {
+  const qrHtml = await renderQrHtml();
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(qrHtml);
+});
+
 app.get("/qr", requireAuth, (_req, res) => {
   if (connected) {
     return res.json({ ok: true, connected: true, qr: null });
@@ -116,6 +123,24 @@ app.get("/qr", requireAuth, (_req, res) => {
     return res.status(404).json({ ok: false, error: "qr_not_ready" });
   }
   return res.json({ ok: true, connected: false, qr: lastQr });
+});
+
+app.get("/qr.svg", async (_req, res) => {
+  if (connected) {
+    return res.status(404).send("WhatsApp already connected");
+  }
+  if (!lastQr) {
+    return res.status(404).send("QR not ready");
+  }
+
+  const svg = await QRCode.toString(lastQr, {
+    type: "svg",
+    margin: 1,
+    width: 320,
+    errorCorrectionLevel: "M",
+  });
+  res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
+  res.send(svg);
 });
 
 app.get("/groups", requireAuth, async (_req, res) => {
@@ -166,3 +191,43 @@ app.listen(PORT, () => {
   log.info({ port: PORT, authDir: AUTH_DIR }, "whatsapp group sender listening");
   connectWhatsApp();
 });
+
+async function renderQrHtml() {
+  const status = connected
+    ? "Connected"
+    : lastQr
+      ? "Ready to scan"
+      : "Waiting for WhatsApp QR";
+
+  const qrImage = connected
+    ? "<p>WhatsApp is already connected.</p>"
+    : lastQr
+      ? '<img alt="WhatsApp QR" src="/qr.svg" style="width:320px;height:320px;image-rendering:pixelated;border:1px solid #ddd;background:#fff;padding:12px" />'
+      : "<p>QR is not ready yet. Refresh in a few seconds.</p>";
+
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WhatsApp Group Sender</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 32px; color: #111; background: #fafafa; }
+      .card { max-width: 760px; margin: 0 auto; padding: 24px; background: #fff; border: 1px solid #ddd; border-radius: 12px; }
+      .status { font-weight: 700; margin-bottom: 16px; }
+      .meta { color: #555; line-height: 1.5; }
+      code { background: #f4f4f4; padding: 2px 6px; border-radius: 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="status">Status: ${status}</div>
+      ${qrImage}
+      <p class="meta">
+        Open this page in a browser on a laptop or another screen, then scan it with WhatsApp on your phone.
+        Once connected, the sidecar can send to any group ID it knows about.
+      </p>
+    </div>
+  </body>
+</html>`;
+}
