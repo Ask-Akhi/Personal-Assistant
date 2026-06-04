@@ -1,6 +1,6 @@
-# Render blueprint — PI Assistant (single-process, free tier)
-# All workers (bot + outbox + reminders) run inside the FastAPI process.
-# Cost: $0/month on free tier (1 web service + 1 free postgres)
+# Render blueprint — PI Assistant.
+# API workers run inside the FastAPI process. WhatsApp group posting uses a
+# separate Node sidecar because Meta Cloud API cannot post to groups.
 services:
   - type: web
     name: assistant-api
@@ -18,6 +18,24 @@ services:
           name: assistant-db
           property: connectionString
       - fromGroup: assistant-secrets
+
+  - type: web
+    name: whatsapp-group-sender
+    runtime: node
+    rootDir: whatsapp-group-sender
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: WHATSAPP_GROUP_SENDER_TOKEN
+        sync: false
+      - key: WA_AUTH_DIR
+        value: /data/auth
+    disks:
+      - name: whatsapp-auth
+        mountPath: /data
+        sizeGB: 1
 
 databases:
   - name: assistant-db
