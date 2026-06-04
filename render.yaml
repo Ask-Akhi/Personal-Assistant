@@ -5,7 +5,8 @@ services:
   - type: web
     name: assistant-api
     runtime: python
-    plan: free
+    plan: starter
+    numInstances: 1
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /healthz
@@ -24,15 +25,20 @@ services:
     name: whatsapp-group-sender
     runtime: node
     rootDir: whatsapp-group-sender
-    plan: free
+    plan: starter
+    numInstances: 1
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /healthz
+    disk:
+      name: whatsapp-auth
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: WHATSAPP_GROUP_SENDER_TOKEN
         sync: false
       - key: WA_AUTH_DIR
-        value: ./auth
+        value: /data/auth
 
 databases:
   - name: assistant-db
@@ -79,3 +85,5 @@ envVarGroups:
         value: "true"
       - key: EVENT_DEFAULT_CUTOFF_HOURS
         value: "26"
+      - key: WEEKLY_EVENT_CUTOFF_HOURS
+        value: "57.5"

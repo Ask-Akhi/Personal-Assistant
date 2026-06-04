@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     whatsapp_group_sender_url: str = ""
     whatsapp_group_sender_token: str = ""
     event_default_cutoff_hours: float = 26.0
+    weekly_event_cutoff_hours: float = 57.5
     telegram_mirror_enabled: bool = True
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""

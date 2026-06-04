@@ -33,10 +33,23 @@ Authorization: Bearer <WHATSAPP_GROUP_SENDER_TOKEN>
 
 ## Render Wiring
 
-Deploy this folder as a separate Node web service. On Render free web services,
-the filesystem is ephemeral, so you will need to scan a new QR after restarts
-or redeploys. If you later move the sidecar to a paid plan, attach a persistent
-disk and point `WA_AUTH_DIR` into that disk.
+Deploy this folder as a separate Node web service. For reliable automation, this
+service must be on a paid always-on instance with a persistent disk. Free Render
+web services spin down and use an ephemeral filesystem, so WhatsApp Web auth can
+be lost and the service may need a fresh QR scan.
+
+The blueprint config uses:
+
+```text
+plan: starter
+disk mount: /data
+WA_AUTH_DIR=/data/auth
+```
+
+After the first successful deploy, open the sidecar root URL and scan the QR
+once. That login state is then written under `/data/auth` and should survive
+normal restarts and deploys. You may still need to scan again if WhatsApp logs
+the device out or you remove the linked device from your phone.
 
 Set these env vars on the Python assistant service:
 
@@ -47,3 +60,7 @@ WHATSAPP_GROUP_SENDER_TOKEN=<same-secret-as-sidecar>
 
 The Python app will automatically route any `@g.us` target through this sidecar.
 Phone-number targets still use WhatsApp Cloud API.
+
+The Python `assistant-api` service also needs to be always-on for Tuesday 7 PM
+and Wednesday 9 PM automation, because its scheduler runs inside the web
+process. The blueprint sets `assistant-api` to `plan: starter` for that reason.

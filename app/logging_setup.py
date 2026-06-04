@@ -18,6 +18,9 @@ def setup_logging() -> None:
         stream=sys.stdout,
         level=level,
     )
+    # httpx includes full Telegram URLs in INFO logs, which can expose bot tokens.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     structlog.configure(
         processors=[

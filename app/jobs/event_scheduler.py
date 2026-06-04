@@ -17,11 +17,14 @@ from app.logging_setup import log
 from app.models import CricketEvent, EventStatus
 from app.services import event_manager
 from app.services.time_utils import utc_now_naive
+from app.jobs.weekly_event_poster import WEEKLY_CUTOFF_HOURS, WEEKLY_TITLE
 
 
 async def run_once() -> None:
     """Check and process any events that have passed their cutoff."""
     now = utc_now_naive()
+
+    await _normalize_weekly_event_cutoffs()
 
     async with session_scope() as s:
         result = await s.execute(
@@ -35,6 +38,39 @@ async def run_once() -> None:
     for event in events:
         log.info("event_scheduler.cutoff_reached", event_id=event.id, title=event.title)
         await _process_event(event)
+
+
+async def _normalize_weekly_event_cutoffs() -> None:
+    """Keep the weekly CHCC event aligned to the Wednesday 9 PM AET calling-list time."""
+    from datetime import timedelta
+
+    desired_offset = timedelta(hours=WEEKLY_CUTOFF_HOURS)
+
+    async with session_scope() as s:
+        result = await s.execute(
+            select(CricketEvent).where(
+                CricketEvent.status == EventStatus.open,
+                CricketEvent.title == WEEKLY_TITLE,
+            )
+        )
+        events = result.scalars().all()
+
+        changed = False
+        for event in events:
+            desired_cutoff = event.event_at - desired_offset
+            if event.cutoff_at != desired_cutoff or event.cutoff_hours != WEEKLY_CUTOFF_HOURS:
+                event.cutoff_at = desired_cutoff
+                event.cutoff_hours = WEEKLY_CUTOFF_HOURS
+                changed = True
+                log.info(
+                    "event_scheduler.weekly_cutoff_normalized",
+                    event_id=event.id,
+                    title=event.title,
+                    cutoff_at=str(desired_cutoff),
+                )
+
+        if changed:
+            await s.flush()
 
 
 async def _process_event(event: CricketEvent) -> None:
@@ -115,17 +151,17 @@ async def _auto_send_if_not_cancelled(event_id: int, calling_list: str) -> None:
     from app.services import wa_sender, audit
     from app.services.telegram_notify import send_admin_message
 
+    event_title = None
     async with session_scope() as s:
         db_event = await s.get(CricketEvent, event_id)
         if not db_event:
             return
 
+        event_title = db_event.title
+
         if db_event.status == EventStatus.cancelled:
             log.info("event_scheduler.send_cancelled", event_id=event_id)
             return
-
-        # Mark closed
-        db_event.status = EventStatus.closed
 
         await audit.record(
             s,
@@ -134,13 +170,13 @@ async def _auto_send_if_not_cancelled(event_id: int, calling_list: str) -> None:
             target=str(event_id),
         )
 
-    # Send to WA group
+    send_failed = False
     if db_event.group_wa_id:
         try:
             await wa_sender.send_text(db_event.group_wa_id, calling_list)
             log.info("event_scheduler.wa_sent", event_id=event_id, group=db_event.group_wa_id)
-            await send_admin_message(f"✅ Calling list sent to WhatsApp group for <b>{db_event.title}</b>")
         except Exception as exc:
+            send_failed = True
             log.error("event_scheduler.wa_send_failed", error=str(exc))
             await send_admin_message(
                 f"⚠️ Failed to send calling list to WA group.\n"
@@ -148,8 +184,21 @@ async def _auto_send_if_not_cancelled(event_id: int, calling_list: str) -> None:
                 f"Copy & paste manually:\n<pre>{calling_list[:2000]}</pre>"
             )
     else:
+        send_failed = True
         # No group WA ID configured — just send to Telegram for manual copy
         await send_admin_message(
             f"📋 <b>Calling list ready</b> (no WA group ID set — copy below):\n\n"
             f"<pre>{calling_list[:3000]}</pre>"
+        )
+
+    async with session_scope() as s:
+        db_event = await s.get(CricketEvent, event_id)
+        if db_event:
+            db_event.calling_list_text = calling_list
+            if not send_failed:
+                db_event.status = EventStatus.closed
+
+    if not send_failed:
+        await send_admin_message(
+            f"✅ Calling list sent to WhatsApp group for <b>{event_title or 'active event'}</b>"
         )

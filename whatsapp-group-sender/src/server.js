@@ -1,4 +1,5 @@
 const express = require("express");
+const fs = require("fs");
 const pino = require("pino");
 const QRCode = require("qrcode");
 const qrcode = require("qrcode-terminal");
@@ -51,6 +52,7 @@ async function connectWhatsApp() {
   reconnecting = true;
 
   try {
+    fs.mkdirSync(AUTH_DIR, { recursive: true });
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
 

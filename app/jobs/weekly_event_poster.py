@@ -16,7 +16,7 @@ from app.config import get_settings
 from app.db import session_scope
 from app.logging_setup import log
 from app.models import CricketEvent, EventStatus
-from app.services.time_utils import as_utc_naive
+from app.services.time_utils import as_utc_aware, as_utc_naive
 
 AET = pytz.timezone("Australia/Sydney")
 _SETTINGS = get_settings()
@@ -26,7 +26,7 @@ WEEKLY_VENUE    = "Coolong Reserve"
 WEEKLY_GROUP    = "CHCC Members"  # Castle Hill Cricket Community
 WEEKLY_START    = (6, 30)   # 6:30 AM
 WEEKLY_END      = (10, 30)  # 10:30 AM
-CUTOFF_HOURS    = _SETTINGS.event_default_cutoff_hours
+WEEKLY_CUTOFF_HOURS = _SETTINGS.weekly_event_cutoff_hours
 
 
 def _next_tuesday_7pm_aet() -> datetime:
@@ -73,15 +73,41 @@ async def _already_exists_for(event_at: datetime) -> bool:
         return row is not None
 
 
+async def _get_existing_for(event_at: datetime) -> CricketEvent | None:
+    """Return the most recent event row for this Saturday, regardless of status."""
+    from sqlalchemy import select
+
+    event_at_utc = as_utc_naive(event_at)
+    lo = event_at_utc - timedelta(hours=12)
+    hi = event_at_utc + timedelta(hours=12)
+
+    async with session_scope() as s:
+        row = (await s.execute(
+            select(CricketEvent)
+            .where(
+                CricketEvent.event_at >= lo,
+                CricketEvent.event_at <= hi,
+            )
+            .order_by(CricketEvent.created_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+        return row
+
+
+def _weekly_cutoff_at(event_at: datetime) -> datetime:
+    """Return the weekly RSVP cutoff datetime in the same timezone as event_at."""
+    return event_at - timedelta(hours=WEEKLY_CUTOFF_HOURS)
+
+
 async def _create_and_announce(event_at: datetime) -> None:
     """Create the CricketEvent row and post the WA announcement."""
     from app.services import wa_sender, audit
     from app.services.telegram_notify import send_admin_message
 
     settings = get_settings()
-    cutoff_at = event_at - timedelta(hours=CUTOFF_HOURS)
-    cutoff_at_utc = cutoff_at.astimezone(pytz.utc).replace(tzinfo=None)
-    event_at_utc  = event_at.astimezone(pytz.utc).replace(tzinfo=None)
+    cutoff_at = _weekly_cutoff_at(event_at)
+    cutoff_at_utc = as_utc_naive(cutoff_at)
+    event_at_utc = as_utc_naive(event_at)
 
     # Auto-lookup group ID from registry (no manual config needed)
     from app.services.group_registry import get_group_for_task
@@ -97,7 +123,7 @@ async def _create_and_announce(event_at: datetime) -> None:
             event_at=event_at_utc,
             venue=WEEKLY_VENUE,
             group_wa_id=group_id or None,
-            cutoff_hours=CUTOFF_HOURS,
+            cutoff_hours=WEEKLY_CUTOFF_HOURS,
             cutoff_at=cutoff_at_utc,
             status=EventStatus.open,
         )
@@ -130,7 +156,9 @@ async def _create_and_announce(event_at: datetime) -> None:
         f"✅ *YES* - Coming\n"
         f"🏏 *WNBO* - Coming but Will Not Bowl\n"
         f"❌ *NO* - Can't make it\n\n"
-        f"📋 Calling list will be shared after the RSVP cutoff. See you on the field! 🏆"
+        f"📋 Calling list will be shared by "
+        f"{as_utc_aware(cutoff_at_utc).astimezone(AET).strftime('%a, %d %b %-I:%M %p AET')}. "
+        f"See you on the field! 🏆"
     )
 
     # Send to WhatsApp group

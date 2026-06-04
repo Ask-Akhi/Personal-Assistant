@@ -13,6 +13,8 @@ import json
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from telegram import Update
+from telegram.error import TelegramError
 
 from app.config import get_settings
 from app.db import engine, session_scope
@@ -29,22 +31,54 @@ _background_tasks: list[asyncio.Task] = []
 
 async def _run_bot():
     """Run Telegram bot in background (polling mode)."""
-    bot_app = None
+    from app.bot import build_app
+
+    bot_app = build_app()
+
     try:
-        from app.bot import build_app
-        bot_app = build_app()
         await bot_app.initialize()
         await bot_app.start()
-        await bot_app.updater.start_polling(drop_pending_updates=True)
+
+        # Clear any stale webhook configuration before polling.
+        try:
+            await bot_app.bot.delete_webhook(drop_pending_updates=True)
+            log.info("bot.webhook_cleared")
+        except TelegramError as exc:
+            log.warning("bot.webhook_clear_failed", error=str(exc))
+
+        try:
+            me = await bot_app.bot.get_me()
+            log.info("bot.identity", username=me.username, bot_id=me.id)
+        except TelegramError as exc:
+            log.warning("bot.identity_failed", error=str(exc))
+
+        def _polling_error_callback(exc: TelegramError) -> None:
+            log.warning("bot.polling_error", error=str(exc))
+
+        await bot_app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+            poll_interval=1.0,
+            bootstrap_retries=-1,
+            error_callback=_polling_error_callback,
+        )
         log.info("bot.started")
-        # Keep running until cancelled
+
         while True:
             await asyncio.sleep(3600)
     except asyncio.CancelledError:
-        if bot_app is not None:
+        try:
             await bot_app.updater.stop()
+        except Exception:
+            pass
+        try:
             await bot_app.stop()
+        except Exception:
+            pass
+        try:
             await bot_app.shutdown()
+        except Exception:
+            pass
         raise
     except Exception as exc:
         log.error("bot.crashed", error=str(exc), exc_info=True)

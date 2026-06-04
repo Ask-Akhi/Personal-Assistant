@@ -7,6 +7,7 @@ Outside that window, use approved templates (not implemented yet).
 from __future__ import annotations
 
 import re
+import asyncio
 
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -18,6 +19,10 @@ WA_API_BASE = "https://graph.facebook.com/v19.0"
 
 
 class WhatsAppSendError(RuntimeError):
+    pass
+
+
+class TemporaryGroupSenderError(WhatsAppSendError):
     pass
 
 
@@ -83,17 +88,42 @@ async def _send_group_text(to: str, text: str, settings) -> str:
             "WHATSAPP_GROUP_SENDER_URL to a group-capable sender service."
         )
 
+    await _wake_group_sender(settings)
+
     headers = {"Content-Type": "application/json"}
     if settings.whatsapp_group_sender_token:
         headers["Authorization"] = f"Bearer {settings.whatsapp_group_sender_token}"
 
     payload = {"group_id": to, "text": text}
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.post(
-            settings.whatsapp_group_sender_url.rstrip("/"),
-            json=payload,
-            headers=headers,
-        )
+    response = None
+    last_error = None
+    for attempt in range(4):
+        try:
+            async with httpx.AsyncClient(timeout=45) as client:
+                response = await client.post(
+                    settings.whatsapp_group_sender_url.rstrip("/"),
+                    json=payload,
+                    headers=headers,
+                )
+        except httpx.TransportError as exc:
+            last_error = exc
+            if attempt < 3:
+                await asyncio.sleep(4 * (attempt + 1))
+                continue
+            raise TemporaryGroupSenderError(
+                f"WhatsApp group sender is unreachable: {exc}"
+            ) from exc
+
+        if response.status_code in {502, 503, 504}:
+            last_error = response
+            if attempt < 3:
+                await asyncio.sleep(6 * (attempt + 1))
+                continue
+            break
+        break
+
+    if response is None and last_error:
+        raise TemporaryGroupSenderError(str(last_error))
 
     if response.is_error:
         error_detail = _extract_error_detail(response)
@@ -103,6 +133,11 @@ async def _send_group_text(to: str, text: str, settings) -> str:
             body=error_detail[:500],
             to=to,
         )
+        if response.status_code in {502, 503, 504}:
+            raise TemporaryGroupSenderError(
+                "WhatsApp group sender is waking up or unavailable on Render. "
+                f"HTTP {response.status_code} - {error_detail[:500]}"
+            )
         raise WhatsAppSendError(
             f"WhatsApp group sender rejected send to {to}: HTTP {response.status_code} - "
             f"{error_detail[:700]}"
@@ -120,6 +155,34 @@ async def _send_group_text(to: str, text: str, settings) -> str:
     )
     log.info("wa_sender.group_sent", to=to, wa_message_id=message_id)
     return message_id
+
+
+async def _wake_group_sender(settings) -> None:
+    base_url = settings.whatsapp_group_sender_url.rstrip("/")
+    if base_url.endswith("/send"):
+        base_url = base_url[: -len("/send")]
+    health_url = f"{base_url}/healthz"
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.get(health_url)
+            if response.is_success:
+                try:
+                    payload = response.json()
+                except ValueError:
+                    return
+                if payload.get("connected") is False:
+                    raise WhatsAppSendError(
+                        "WhatsApp group sender is running but not connected. "
+                        "Open the sidecar URL, scan the QR, and retry."
+                    )
+                return
+            if response.status_code not in {502, 503, 504}:
+                return
+        except httpx.TransportError:
+            pass
+        await asyncio.sleep(5 * (attempt + 1))
 
 
 def _extract_error_detail(response: httpx.Response) -> str:

@@ -103,6 +103,68 @@ async def get_active_event(session: AsyncSession) -> CricketEvent | None:
     return result.scalar_one_or_none()
 
 
+async def get_latest_event(session: AsyncSession) -> CricketEvent | None:
+    """Return the most recently created cricket event, regardless of status."""
+    result = await session.execute(
+        select(CricketEvent)
+        .order_by(CricketEvent.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_latest_weekly_event(session: AsyncSession) -> CricketEvent | None:
+    """Return the latest CHCC weekly cricket event, regardless of status."""
+    result = await session.execute(
+        select(CricketEvent)
+        .where(CricketEvent.title == "CHCC Members - T20 Cricket")
+        .order_by(CricketEvent.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_event_near_datetime(
+    session: AsyncSession,
+    event_at: datetime,
+    hours_window: int = 12,
+) -> CricketEvent | None:
+    """Return the most recent event row close to a target UTC datetime."""
+    lo = event_at - timedelta(hours=hours_window)
+    hi = event_at + timedelta(hours=hours_window)
+    result = await session.execute(
+        select(CricketEvent)
+        .where(
+            CricketEvent.event_at >= lo,
+            CricketEvent.event_at <= hi,
+        )
+        .order_by(CricketEvent.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def resolve_event_for_control_plane(
+    session: AsyncSession,
+    preferred_event_at: datetime | None = None,
+) -> CricketEvent | None:
+    """Best-effort event lookup for Telegram commands without creating new rows."""
+    event = await get_active_event(session)
+    if event:
+        return event
+
+    if preferred_event_at is not None:
+        event = await get_event_near_datetime(session, preferred_event_at)
+        if event:
+            return event
+
+    event = await get_latest_weekly_event(session)
+    if event:
+        return event
+
+    return await get_latest_event(session)
+
+
 async def upsert_rsvp(
     session: AsyncSession,
     event: CricketEvent,

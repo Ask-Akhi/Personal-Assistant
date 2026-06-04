@@ -70,6 +70,13 @@ def allowlist_only(fn):
     @wraps(fn)
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         uid = update.effective_user.id if update.effective_user else 0
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        log.info(
+            "bot.command_received",
+            command=getattr(getattr(update, "message", None), "text", None) or getattr(getattr(update, "callback_query", None), "data", None),
+            user_id=uid,
+            chat_id=chat_id,
+        )
         if not auth.is_allowed(uid):
             log.warning("bot.denied", user_id=uid)
             if update.message:
@@ -108,7 +115,10 @@ async def cmd_start(update: Update, _ctx):
 
 @allowlist_only
 async def cmd_ping(update: Update, _ctx):
-    await update.message.reply_text("pong ✅")
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    log.info("bot.ping_handled", chat_id=chat_id, user_id=update.effective_user.id if update.effective_user else 0)
+    await _ctx.bot.send_message(chat_id=chat_id, text="pong ✅")
+    log.info("bot.ping_sent", chat_id=chat_id)
 
 
 async def handle_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -481,7 +491,7 @@ def _group_callback_data(event_id: int, group_id: str) -> str:
 async def cmd_wagroups(update: Update, _ctx):
     """Show live WhatsApp groups from the sidecar and allow choosing one for the active event."""
     async with session_scope() as s:
-        ev = await event_manager.get_active_event(s)
+        ev = await event_manager.resolve_event_for_control_plane(s)
     if not ev:
         await update.message.reply_text("No active event. Create one with /newevent first.")
         return
@@ -718,18 +728,23 @@ async def cmd_votes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_callinglist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Preview or manually send the calling list for the active event."""
     async with session_scope() as s:
-        ev = await event_manager.get_active_event(s)
+        ev = await event_manager.resolve_event_for_control_plane(s)
         if not ev:
             await update.message.reply_text("No active event.")
             return
         calling_list = await event_manager.build_calling_list(s, ev)
+
+    if ev.status != EventStatus.open:
+        prefix = f"📋 *Preview - {ev.title}* (most recent event)\n\n"
+    else:
+        prefix = f"📋 *Preview - {ev.title}*\n\n"
 
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("📤 Send to WA Group", callback_data=f"event:send:{ev.id}"),
         InlineKeyboardButton("🛑 Cancel", callback_data=f"event:cancel:{ev.id}"),
     ]])
     await update.message.reply_text(
-        f"📋 *Preview - {ev.title}*\n\n```\n{calling_list}\n```",
+        f"{prefix}```\n{calling_list}\n```",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -745,14 +760,12 @@ async def cmd_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     If an event already exists, the announcement is re-sent without duplicating the DB row.
     """
     from app.jobs.weekly_event_poster import (
-        _next_saturday, _already_exists_for, _create_and_announce, AET, CUTOFF_HOURS
+        _next_saturday, _already_exists_for, _get_existing_for, _create_and_announce, AET
     )
     from app.services.group_registry import get_group_for_task
     from app.services import wa_sender
-    from app.services.telegram_notify import send_admin_message
     import pytz
 
-    uid = update.effective_user.id
     override_group = ctx.args[0].strip() if ctx.args else None
     if override_group and override_group.startswith("/"):
         await update.message.reply_text(
@@ -766,7 +779,8 @@ async def cmd_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # If already exists, just re-post the announcement (don't create duplicate)
     async with session_scope() as s:
-        ev = await event_manager.get_active_event(s)
+        saturday_utc = saturday.astimezone(pytz.utc).replace(tzinfo=None)
+        ev = await event_manager.resolve_event_for_control_plane(s, preferred_event_at=saturday_utc)
         if ev is None:
             # check if one exists (even closed) for this Saturday
             from app.jobs.weekly_event_poster import _already_exists_for as _ae
@@ -787,10 +801,19 @@ async def cmd_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("ℹ️ Event already exists. Re-sending announcement to group...")
 
     async with session_scope() as s:
-        ev = await event_manager.get_active_event(s)
+        saturday_utc = saturday.astimezone(pytz.utc).replace(tzinfo=None)
+        ev = await event_manager.resolve_event_for_control_plane(s, preferred_event_at=saturday_utc)
+        if ev:
+            db_event = await s.get(CricketEvent, ev.id)
+            if db_event and db_event.status != EventStatus.open:
+                db_event.status = EventStatus.open
+            ev = db_event or ev
 
     if not ev:
-        await update.message.reply_text("⚠️ Could not find active event. Try /newevent instead.")
+        await update.message.reply_text(
+            "⚠️ I can see a weekly event should exist, but I could not load its row safely. "
+            "I did not recreate anything, so your existing list stays untouched."
+        )
         return
 
     # Resolve group ID
