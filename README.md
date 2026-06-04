@@ -81,3 +81,4 @@ See `.env.example`. Required for Phase 1:
 - Follow [docs/WHATSAPP_WEBHOOK_SETUP.md](docs/WHATSAPP_WEBHOOK_SETUP.md) for the Meta + Render connection steps.
 - WhatsApp Cloud API is still used for webhook ingestion and direct messages. Automatic posting to WhatsApp groups needs a separate group-capable sender behind `WHATSAPP_GROUP_SENDER_URL`.
 - The group sender lives in [docs/WHATSAPP_GROUP_SENDER.md](docs/WHATSAPP_GROUP_SENDER.md) and can post to any WhatsApp group visible to the logged-in WhatsApp account.
+- Use `/wagroups` in Telegram to pick a live WhatsApp group and bind it to the active event.

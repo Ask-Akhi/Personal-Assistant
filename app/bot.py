@@ -18,6 +18,7 @@ Commands (Phase 1 + 2 + 3):
   /announce [group_wa_id] - post this Saturday's event NOW (creates if needed, re-sends if exists)
   /votes                  - show live RSVPs for the active event
   /callinglist            - preview + manually send calling list
+  /wagroups               - list live WhatsApp groups from the sidecar
   /closeevent             - cancel the active event without sending
 
 Inline button callbacks (Phase 2):
@@ -34,9 +35,11 @@ Inline button callbacks (Phase 3 events):
 from __future__ import annotations
 
 import asyncio
+import base64
 from functools import wraps
 
 from datetime import datetime
+import httpx
 from sqlalchemy import select
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -98,7 +101,7 @@ def pin_required(fn):
 async def cmd_start(update: Update, _ctx):
     await update.message.reply_text(
         "🤖 Personal Assistant - Phase 2 (Drafting)\n"
-        "Commands: /ping /whoami /note /notes /audit /inbox /quiet /drafts\n"
+        "Commands: /ping /whoami /note /notes /audit /inbox /quiet /drafts /wagroups\n"
         "Destructive commands require /unlock <pin>."
     )
 
@@ -436,6 +439,140 @@ async def handle_event_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+def _sidecar_base_url() -> str | None:
+    url = (get_settings().whatsapp_group_sender_url or "").strip()
+    if not url:
+        return None
+    if url.endswith("/send"):
+        return url[: -len("/send")].rstrip("/")
+    return url.rstrip("/")
+
+
+async def _fetch_live_groups() -> list[dict]:
+    base_url = _sidecar_base_url()
+    if not base_url:
+        raise RuntimeError("WHATSAPP_GROUP_SENDER_URL not configured")
+
+    headers = {}
+    token = (get_settings().whatsapp_group_sender_token or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.get(f"{base_url}/groups", headers=headers)
+    if response.is_error:
+        raise RuntimeError(
+            f"Group sender error: HTTP {response.status_code} {response.text[:200]}"
+        )
+
+    data = response.json()
+    groups = data.get("groups") or []
+    if not isinstance(groups, list):
+        return []
+    return [g for g in groups if isinstance(g, dict)]
+
+
+def _group_callback_data(event_id: int, group_id: str) -> str:
+    encoded = base64.urlsafe_b64encode(group_id.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"wagroup:set:{event_id}:{encoded}"
+
+
+@allowlist_only
+async def cmd_wagroups(update: Update, _ctx):
+    """Show live WhatsApp groups from the sidecar and allow choosing one for the active event."""
+    async with session_scope() as s:
+        ev = await event_manager.get_active_event(s)
+    if not ev:
+        await update.message.reply_text("No active event. Create one with /newevent first.")
+        return
+
+    try:
+        groups = await _fetch_live_groups()
+    except Exception as exc:
+        await update.message.reply_text(
+            f"⚠️ Could not load WhatsApp groups: `{str(exc)[:250]}`",
+            parse_mode="Markdown",
+        )
+        return
+
+    if not groups:
+        await update.message.reply_text("No WhatsApp groups returned by the sidecar yet.")
+        return
+
+    rows = []
+    for group in groups[:20]:
+        group_id = str(group.get("id") or "").strip()
+        subject = str(group.get("subject") or "Unknown").strip()
+        participants = group.get("participants") or 0
+        if not group_id.endswith("@g.us"):
+            continue
+        rows.append([
+            InlineKeyboardButton(
+                f"{subject[:28]} ({participants})",
+                callback_data=_group_callback_data(ev.id, group_id),
+            )
+        ])
+
+    if not rows:
+        await update.message.reply_text("No group IDs ending in @g.us were returned.")
+        return
+
+    await update.message.reply_text(
+        f"Choose the WhatsApp group to bind to *{ev.title}*:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows[:20]),
+    )
+
+
+async def handle_wagroup_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id if query.from_user else 0
+    if not auth.is_allowed(uid):
+        await query.answer("Not authorised.")
+        return
+    await query.answer()
+
+    parts = (query.data or "").split(":")
+    if len(parts) != 4 or parts[0] != "wagroup" or parts[1] != "set":
+        return
+
+    event_id = int(parts[2])
+    padding = "=" * (-len(parts[3]) % 4)
+    group_id = base64.urlsafe_b64decode((parts[3] + padding).encode("ascii")).decode("utf-8")
+
+    try:
+        groups = await _fetch_live_groups()
+        selected = next((g for g in groups if str(g.get("id") or "") == group_id), {})
+        group_name = str(selected.get("subject") or group_id)
+    except Exception:
+        group_name = group_id
+
+    async with session_scope() as s:
+        ev = await s.get(CricketEvent, event_id)
+        if not ev:
+            await query.message.reply_text("⚠️ Event not found.")
+            return
+        ev.group_wa_id = group_id
+        await audit.record(
+            s,
+            actor=f"user:{uid}",
+            action="event_group_assigned",
+            target=str(event_id),
+            payload={"group_id": group_id, "group_name": group_name},
+        )
+        from app.services.group_registry import auto_register_group
+        await auto_register_group(
+            s,
+            raw_message={"from": group_id},
+            group_name=group_name,
+        )
+
+    await query.message.reply_text(
+        f"✅ Bound *{ev.title}* to `{group_id}`",
+        parse_mode="Markdown",
+    )
+
+
 # - Edit-reply plain text handler -
 @allowlist_only
 async def handle_edit_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -700,7 +837,7 @@ async def cmd_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(
             f"⚠️ No WA group ID found. Copy and paste manually:\n\n```\n{announcement}\n```\n\n"
-            f"Or use: `/announce <group_wa_id>` to set it.",
+            f"Use `/wagroups` to pick a WhatsApp group from the sidecar, or use: `/announce <group_wa_id>`.",
             parse_mode="Markdown"
         )
 
@@ -984,6 +1121,7 @@ def build_app():
     app.add_handler(CommandHandler("announce",       cmd_announce))
     app.add_handler(CommandHandler("votes",          cmd_votes))
     app.add_handler(CommandHandler("callinglist",    cmd_callinglist))
+    app.add_handler(CommandHandler("wagroups",       cmd_wagroups))
     app.add_handler(CommandHandler("closeevent",      cmd_closeevent))
     app.add_handler(CommandHandler("groups",          cmd_groups))
     app.add_handler(CommandHandler("testrsvp",        cmd_testrsvp))
@@ -991,6 +1129,7 @@ def build_app():
     app.add_handler(CommandHandler("bulkrsvp",        cmd_bulkrsvp))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_reply))
+    app.add_handler(CallbackQueryHandler(handle_wagroup_callback, pattern=r"^wagroup:"))
     app.add_error_handler(handle_error)
 
     return app
