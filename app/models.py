@@ -240,7 +240,7 @@ class CricketEvent(Base):
     event_at: Mapped[datetime] = mapped_column(DateTime)                 # match datetime
     venue: Mapped[str | None] = mapped_column(String(256), nullable=True)
     group_wa_id: Mapped[str | None] = mapped_column(String(64), nullable=True)  # WA group id
-    cutoff_hours: Mapped[float] = mapped_column(Float, default=36.0)     # hours before event
+    cutoff_hours: Mapped[float] = mapped_column(Float, default=26.0)     # hours before event
     cutoff_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     status: Mapped[EventStatus] = mapped_column(
         Enum(EventStatus), default=EventStatus.open, index=True

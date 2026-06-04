@@ -483,7 +483,11 @@ async def cmd_newevent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     venue = parts[2] if len(parts) > 2 else None
     group_wa_id = parts[3] if len(parts) > 3 else None
-    cutoff_hours = float(parts[4]) if len(parts) > 4 and parts[4].replace(".", "").isdigit() else 36.0
+    cutoff_hours = (
+        float(parts[4])
+        if len(parts) > 4 and parts[4].replace(".", "").isdigit()
+        else get_settings().event_default_cutoff_hours
+    )
 
     cutoff_at = event_at - timedelta(hours=cutoff_hours)
 

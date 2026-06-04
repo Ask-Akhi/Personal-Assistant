@@ -22,6 +22,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.logging_setup import log
 from app.models import (
     Contact, CricketEvent, EventRsvp, EventStatus, InboundMessage, RsvpStatus
@@ -463,8 +464,9 @@ async def auto_detect_and_create_event(
         or inbound.from_external_id  # fallback: treat sender as target for direct groups
     )
 
-    # Cutoff = 36 hours before event
-    cutoff_at = event_dt - timedelta(hours=36)
+    # Cutoff uses the configured default lead time before the event.
+    cutoff_hours = get_settings().event_default_cutoff_hours
+    cutoff_at = event_dt - timedelta(hours=cutoff_hours)
     # If cutoff already passed, use 2 hours from now
     now = datetime.now(timezone.utc)
     if cutoff_at < now:
@@ -477,7 +479,7 @@ async def auto_detect_and_create_event(
         event_at=event_dt.replace(tzinfo=None),  # store naive UTC
         venue=detected["venue"],
         group_wa_id=group_wa_id,
-        cutoff_hours=36.0,
+        cutoff_hours=cutoff_hours,
         cutoff_at=cutoff_at.replace(tzinfo=None),
     )
     session.add(event)

@@ -30,13 +30,10 @@ class WhatsAppSendError(RuntimeError):
 async def send_text(to: str, text: str) -> str:
     """Send a free-form text message.  Returns the WA message id."""
     settings = get_settings()
+    if to.endswith("@g.us"):
+        return await _send_group_text(to, text, settings)
     if not settings.whatsapp_cloud_token or not settings.whatsapp_phone_number_id:
         raise RuntimeError("WHATSAPP_CLOUD_TOKEN or WHATSAPP_PHONE_NUMBER_ID not set")
-    if to.endswith("@g.us"):
-        raise WhatsAppSendError(
-            "WhatsApp Cloud API Graph /messages cannot send to group IDs (@g.us). "
-            "Use the manual copy text, or wire a WhatsApp Web/Baileys-style group sender."
-        )
     if not re.fullmatch(r"\+?\d{8,15}", to):
         raise WhatsAppSendError(
             f"Invalid WhatsApp Cloud API recipient '{to}'. Use an E.164 phone number "
@@ -76,6 +73,52 @@ async def send_text(to: str, text: str) -> str:
         (data.get("messages") or [{}])[0].get("id") or ""
     )
     log.info("wa_sender.sent", to=to, wa_message_id=message_id)
+    return message_id
+
+
+async def _send_group_text(to: str, text: str, settings) -> str:
+    if not settings.whatsapp_group_sender_url:
+        raise WhatsAppSendError(
+            "Automatic WhatsApp group posting is not configured yet. Set "
+            "WHATSAPP_GROUP_SENDER_URL to a group-capable sender service."
+        )
+
+    headers = {"Content-Type": "application/json"}
+    if settings.whatsapp_group_sender_token:
+        headers["Authorization"] = f"Bearer {settings.whatsapp_group_sender_token}"
+
+    payload = {"group_id": to, "text": text}
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            settings.whatsapp_group_sender_url.rstrip("/"),
+            json=payload,
+            headers=headers,
+        )
+
+    if response.is_error:
+        error_detail = _extract_error_detail(response)
+        log.error(
+            "wa_sender.group_error",
+            status=response.status_code,
+            body=error_detail[:500],
+            to=to,
+        )
+        raise WhatsAppSendError(
+            f"WhatsApp group sender rejected send to {to}: HTTP {response.status_code} - "
+            f"{error_detail[:700]}"
+        )
+
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+    message_id = str(
+        data.get("message_id")
+        or data.get("id")
+        or data.get("wa_message_id")
+        or "group-send-ok"
+    )
+    log.info("wa_sender.group_sent", to=to, wa_message_id=message_id)
     return message_id
 
 

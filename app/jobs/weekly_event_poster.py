@@ -19,13 +19,14 @@ from app.models import CricketEvent, EventStatus
 from app.services.time_utils import as_utc_naive
 
 AET = pytz.timezone("Australia/Sydney")
+_SETTINGS = get_settings()
 
 WEEKLY_TITLE    = "CHCC Members - T20 Cricket"
 WEEKLY_VENUE    = "Coolong Reserve"
 WEEKLY_GROUP    = "CHCC Members"  # Castle Hill Cricket Community
 WEEKLY_START    = (6, 30)   # 6:30 AM
 WEEKLY_END      = (10, 30)  # 10:30 AM
-CUTOFF_HOURS    = 36.0      # close RSVP 36 hrs before event
+CUTOFF_HOURS    = _SETTINGS.event_default_cutoff_hours
 
 
 def _next_tuesday_7pm_aet() -> datetime:
@@ -129,7 +130,7 @@ async def _create_and_announce(event_at: datetime) -> None:
         f"✅ *YES* - Coming\n"
         f"🏏 *WNBO* - Coming but Will Not Bowl\n"
         f"❌ *NO* - Can't make it\n\n"
-        f"📋 Calling list will be shared in 36 hours. See you on the field! 🏆"
+        f"📋 Calling list will be shared after the RSVP cutoff. See you on the field! 🏆"
     )
 
     # Send to WhatsApp group

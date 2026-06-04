@@ -42,6 +42,10 @@ envVarGroups:
         sync: false
       - key: WHATSAPP_PHONE_NUMBER_ID
         sync: false
+      - key: WHATSAPP_GROUP_SENDER_URL
+        sync: false
+      - key: WHATSAPP_GROUP_SENDER_TOKEN
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: GROQ_API_KEY
@@ -58,3 +62,5 @@ envVarGroups:
         value: "8"
       - key: TELEGRAM_MIRROR_ENABLED
         value: "true"
+      - key: EVENT_DEFAULT_CUTOFF_HOURS
+        value: "26"

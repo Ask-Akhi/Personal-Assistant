@@ -60,6 +60,9 @@ See `.env.example`. Required for Phase 1:
 - `UNDO_WINDOW_SECONDS` (defaults to `30`)
 - `WHATSAPP_VERIFY_TOKEN` (required when connecting Meta webhook)
 - `WHATSAPP_APP_SECRET` (recommended; enables request signature validation)
+- `EVENT_DEFAULT_CUTOFF_HOURS` (defaults to `26`)
+- `WHATSAPP_GROUP_SENDER_URL` (required for automatic posting to WhatsApp groups)
+- `WHATSAPP_GROUP_SENDER_TOKEN` (optional bearer token for the group sender)
 
 ## Security posture
 - Telegram allowlist is by **numeric user_id**, not @username.
@@ -76,3 +79,4 @@ See `.env.example`. Required for Phase 1:
 - Use `/inbox` in Telegram to inspect the latest stored inbound messages.
 - Use `/readyz` to check whether required webhook and Telegram settings are present without exposing secret values.
 - Follow [docs/WHATSAPP_WEBHOOK_SETUP.md](docs/WHATSAPP_WEBHOOK_SETUP.md) for the Meta + Render connection steps.
+- WhatsApp Cloud API is still used for webhook ingestion and direct messages. Automatic posting to WhatsApp groups needs a separate group-capable sender behind `WHATSAPP_GROUP_SENDER_URL`.
