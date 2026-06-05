@@ -25,7 +25,7 @@ services:
     name: whatsapp-group-sender
     runtime: node
     rootDir: whatsapp-group-sender
-    plan: starter
+    plan: standard
     numInstances: 1
     buildCommand: npm install
     startCommand: npm start
