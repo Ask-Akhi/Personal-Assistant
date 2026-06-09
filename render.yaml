@@ -25,22 +25,20 @@ services:
     name: whatsapp-group-sender
     runtime: node
     rootDir: whatsapp-group-sender
-    plan: standard
+    plan: free
     numInstances: 1
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /healthz
-    disk:
-      name: whatsapp-auth
-      mountPath: /data
-      sizeGB: 1
     envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: assistant-db
+          property: connectionString
       - key: WHATSAPP_GROUP_SENDER_TOKEN
         sync: false
       - key: ASSISTANT_API_URL
         sync: false
-      - key: WA_AUTH_DIR
-        value: /data/auth
 
 databases:
   - name: assistant-db

@@ -33,23 +33,22 @@ Authorization: Bearer <WHATSAPP_GROUP_SENDER_TOKEN>
 
 ## Render Wiring
 
-Deploy this folder as a separate Node web service. For reliable automation, this
-service must be on a paid always-on instance with a persistent disk. Free Render
-web services spin down and use an ephemeral filesystem, so WhatsApp Web auth can
-be lost and the service may need a fresh QR scan.
+Deploy this folder as a separate Node web service. The sidecar now prefers
+database-backed auth when `DATABASE_URL` is set, which means the WhatsApp linked
+device session can survive restarts and free-instance spin-down without needing
+to re-scan the QR on every deploy.
 
 The blueprint config uses:
 
 ```text
-plan: starter
-disk mount: /data
-WA_AUTH_DIR=/data/auth
+plan: free
+DATABASE_URL=<assistant-db connection string>
 ```
 
 After the first successful deploy, open the sidecar root URL and scan the QR
-once. That login state is then written under `/data/auth` and should survive
-normal restarts and deploys. You may still need to scan again if WhatsApp logs
-the device out or you remove the linked device from your phone.
+once. That login state is then written to Postgres and should survive normal
+restarts and deploys. You may still need to scan again if WhatsApp logs the
+device out or you remove the linked device from your phone.
 
 Set these env vars on the Python assistant service:
 

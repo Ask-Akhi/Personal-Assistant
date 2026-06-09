@@ -10,6 +10,7 @@
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.18",
     "express": "^4.19.2",
+    "pg": "^8.13.1",
     "qrcode": "^1.5.4",
     "pino": "^9.3.2",
     "qrcode-terminal": "^0.12.0"

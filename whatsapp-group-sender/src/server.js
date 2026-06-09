@@ -1,12 +1,17 @@
 const express = require("express");
 const fs = require("fs");
 const pino = require("pino");
+const { Pool } = require("pg");
 const QRCode = require("qrcode");
 const qrcode = require("qrcode-terminal");
 
 const {
+  BufferJSON,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  initAuthCreds,
+  makeCacheableSignalKeyStore,
+  proto,
   useMultiFileAuthState,
 } = require("@whiskeysockets/baileys");
 const makeWASocket = require("@whiskeysockets/baileys").default;
@@ -15,6 +20,7 @@ const PORT = Number(process.env.PORT || 8080);
 const AUTH_DIR = process.env.WA_AUTH_DIR || "./auth";
 const API_TOKEN = process.env.WHATSAPP_GROUP_SENDER_TOKEN || "";
 const ASSISTANT_API_URL = process.env.ASSISTANT_API_URL || process.env.WHATSAPP_INGEST_URL || "";
+const DATABASE_URL = process.env.DATABASE_URL || "";
 
 const app = express();
 const log = pino({ level: process.env.LOG_LEVEL || "info" });
@@ -26,6 +32,8 @@ let connected = false;
 let lastQr = null;
 let me = null;
 let reconnecting = false;
+let authBackend = DATABASE_URL ? "postgres" : "filesystem";
+let authPool = null;
 
 function requireAuth(req, res, next) {
   if (!API_TOKEN) {
@@ -169,8 +177,9 @@ async function connectWhatsApp() {
   reconnecting = true;
 
   try {
-    fs.mkdirSync(AUTH_DIR, { recursive: true });
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const { state, saveCreds } = DATABASE_URL
+      ? await usePostgresAuthState(DATABASE_URL)
+      : await useFilesystemAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
@@ -234,6 +243,7 @@ app.get("/healthz", (_req, res) => {
     has_qr: Boolean(lastQr),
     user: me,
     assistant_api_configured: Boolean(ASSISTANT_API_URL),
+    auth_backend: authBackend,
   });
 });
 
@@ -316,12 +326,100 @@ app.post("/", requireAuth, sendGroupMessage);
 app.post("/send", requireAuth, sendGroupMessage);
 
 app.listen(PORT, () => {
-  log.info({ port: PORT, authDir: AUTH_DIR }, "whatsapp group sender listening");
+  log.info({ port: PORT, authDir: AUTH_DIR, authBackend }, "whatsapp group sender listening");
   if (!ASSISTANT_API_URL) {
     log.warn("ASSISTANT_API_URL is not set; inbound group RSVP syncing is disabled");
   }
   connectWhatsApp();
 });
+
+async function useFilesystemAuthState(folder) {
+  fs.mkdirSync(folder, { recursive: true });
+  authBackend = "filesystem";
+  return useMultiFileAuthState(folder);
+}
+
+async function usePostgresAuthState(connectionString) {
+  authPool =
+    authPool ||
+    new Pool({
+      connectionString,
+    });
+
+  await authPool.query(`
+    create table if not exists wa_auth_state (
+      key text primary key,
+      value jsonb not null,
+      updated_at timestamptz not null default now()
+    )
+  `);
+
+  const writeData = async (data, key) => {
+    const payload = JSON.stringify(data, BufferJSON.replacer);
+    await authPool.query(
+      `
+      insert into wa_auth_state (key, value, updated_at)
+      values ($1, $2::jsonb, now())
+      on conflict (key)
+      do update set value = excluded.value, updated_at = now()
+      `,
+      [key, payload]
+    );
+  };
+
+  const readData = async (key) => {
+    const result = await authPool.query(
+      "select value from wa_auth_state where key = $1",
+      [key]
+    );
+    if (!result.rowCount) {
+      return null;
+    }
+    return JSON.parse(JSON.stringify(result.rows[0].value), BufferJSON.reviver);
+  };
+
+  const removeData = async (key) => {
+    await authPool.query("delete from wa_auth_state where key = $1", [key]);
+  };
+
+  const creds = (await readData("creds.json")) || initAuthCreds();
+  authBackend = "postgres";
+
+  const keyStore = {
+    get: async (type, ids) => {
+      const data = {};
+      await Promise.all(
+        ids.map(async (id) => {
+          let value = await readData(`${type}-${id}.json`);
+          if (type === "app-state-sync-key" && value) {
+            value = proto.Message.AppStateSyncKeyData.fromObject(value);
+          }
+          data[id] = value;
+        })
+      );
+      return data;
+    },
+    set: async (data) => {
+      const tasks = [];
+      for (const category in data) {
+        for (const id in data[category]) {
+          const value = data[category][id];
+          const key = `${category}-${id}.json`;
+          tasks.push(value ? writeData(value, key) : removeData(key));
+        }
+      }
+      await Promise.all(tasks);
+    },
+  };
+
+  return {
+    state: {
+      creds,
+      keys: makeCacheableSignalKeyStore(keyStore, log.child({ component: "auth-store" })),
+    },
+    saveCreds: async () => writeData(creds, "creds.json"),
+  };
+}
 
 async function renderQrHtml() {
   const status = connected
