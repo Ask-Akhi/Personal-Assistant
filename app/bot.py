@@ -692,7 +692,7 @@ async def cmd_newevent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_votes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show current RSVP count for the active event."""
     async with session_scope() as s:
-        ev = await event_manager.get_active_event(s)
+        ev = await event_manager.resolve_event_for_control_plane(s)
         if not ev:
             await update.message.reply_text("No active event. Create one with /newevent")
             return

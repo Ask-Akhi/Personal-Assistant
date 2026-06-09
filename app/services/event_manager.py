@@ -45,6 +45,15 @@ _EVENT_RESPONSE_TO_RSVP: dict[object, RsvpStatus] = {
     "not_going": RsvpStatus.no,
     "not going": RsvpStatus.no,
     "no": RsvpStatus.no,
+    "GOING": RsvpStatus.yes,
+    "NOT_GOING": RsvpStatus.no,
+    "MAYBE": RsvpStatus.maybe,
+    "EVENT_RESPONSE_TYPE_GOING": RsvpStatus.yes,
+    "EVENT_RESPONSE_TYPE_NOT_GOING": RsvpStatus.no,
+    "EVENT_RESPONSE_TYPE_MAYBE": RsvpStatus.maybe,
+    "event_response_type_going": RsvpStatus.yes,
+    "event_response_type_not_going": RsvpStatus.no,
+    "event_response_type_maybe": RsvpStatus.maybe,
 }
 
 # ── RSVP keyword classifier ──────────────────────────────────────────
@@ -132,6 +141,19 @@ async def get_active_event_for_group(session: AsyncSession, group_wa_id: str) ->
             CricketEvent.status == EventStatus.open,
             CricketEvent.group_wa_id == group_wa_id,
         )
+        .order_by(CricketEvent.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_latest_event_for_group(session: AsyncSession, group_wa_id: str) -> CricketEvent | None:
+    """Return the latest event row for a specific WA group, regardless of status."""
+    if not group_wa_id:
+        return None
+    result = await session.execute(
+        select(CricketEvent)
+        .where(CricketEvent.group_wa_id == group_wa_id)
         .order_by(CricketEvent.created_at.desc())
         .limit(1)
     )
@@ -324,6 +346,8 @@ async def handle_possible_rsvp(
     """
     group_wa_id = _extract_group_wa_id(inbound)
     event = await get_active_event_for_group(session, group_wa_id) if group_wa_id else None
+    if not event:
+        event = await get_latest_event_for_group(session, group_wa_id) if group_wa_id else None
     if not event:
         event = await get_active_event(session)
     if not event:

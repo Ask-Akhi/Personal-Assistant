@@ -34,6 +34,15 @@ let me = null;
 let reconnecting = false;
 let authBackend = DATABASE_URL ? "postgres" : "filesystem";
 let authPool = null;
+let forwardStats = {
+  attempts: 0,
+  successes: 0,
+  failures: 0,
+  lastStatus: null,
+  lastError: null,
+  lastForwardedAt: null,
+  lastForwardedCount: 0,
+};
 
 function requireAuth(req, res, next) {
   if (!API_TOKEN) {
@@ -82,8 +91,35 @@ function normalizeEventResponse(response) {
     not_going: "not_going",
     "not going": "not_going",
     no: "not_going",
+    unknown: "unknown",
+    GOING: "going",
+    NOT_GOING: "not_going",
+    MAYBE: "maybe",
+    UNKNOWN: "unknown",
+    EVENT_RESPONSE_TYPE_GOING: "going",
+    EVENT_RESPONSE_TYPE_NOT_GOING: "not_going",
+    EVENT_RESPONSE_TYPE_MAYBE: "maybe",
   };
   return map[raw] || map[String(raw).trim().toLowerCase()] || null;
+}
+
+function responseParticipant(response, fallbackGroupId) {
+  const key = response?.eventResponseMessageKey || response?.key || {};
+  return String(key.participant || key.participantPn || key.participantLid || key.remoteJid || fallbackGroupId || "").trim();
+}
+
+function responseTimestamp(response, fallbackSeconds) {
+  const raw = response?.timestampMs || response?.eventResponseMessage?.timestampMs || fallbackSeconds * 1000;
+  const n = Number(raw);
+  if (Number.isFinite(n)) {
+    return n > 100000000000 ? n : n * 1000;
+  }
+  return Date.now();
+}
+
+function eventResponseExternalId(response, eventMessageId, participant) {
+  const key = response?.eventResponseMessageKey || response?.key || {};
+  return String(key.id || `${eventMessageId || "event"}:${participant || "unknown"}`);
 }
 
 async function forwardInboundMessages(messages) {
@@ -93,7 +129,12 @@ async function forwardInboundMessages(messages) {
 
   const normalized = [];
   for (const message of messages || []) {
-    if (!message?.key || message.key.fromMe) {
+    if (!message?.key) {
+      continue;
+    }
+
+    const hasEventResponses = Array.isArray(message.eventResponses) && message.eventResponses.length > 0;
+    if (message.key.fromMe && !hasEventResponses) {
       continue;
     }
 
@@ -105,6 +146,43 @@ async function forwardInboundMessages(messages) {
     const content = message.message || {};
     const eventResponse = content.eventResponseMessage || null;
     const text = eventResponse ? normalizeEventResponse(eventResponse.response) : extractMessageText(message);
+    if (Array.isArray(message.eventResponses)) {
+      for (const response of message.eventResponses) {
+        const responseMessage = response?.eventResponseMessage || {};
+        const participant = responseParticipant(response, groupId);
+        const responseText = normalizeEventResponse(responseMessage.response);
+        if (!participant || !responseText || responseText === "unknown") {
+          continue;
+        }
+
+        normalized.push({
+          external_id: eventResponseExternalId(response, message.key.id, participant),
+          from_external_id: participant,
+          display_name: null,
+          message_type: "event_response",
+          text: responseText,
+          received_at: new Date(responseTimestamp(response, Number(message.messageTimestamp || Math.floor(Date.now() / 1000)))).toISOString(),
+          group_id: groupId,
+          group_name: message.chatName || null,
+          event_response: {
+            response: responseMessage.response,
+            normalized_response: responseText,
+            extra_guest_count: responseMessage.extraGuestCount ?? null,
+            event_message_id: message.key.id || null,
+          },
+          raw: {
+            key: response?.eventResponseMessageKey || null,
+            event_key: message.key,
+            event_response: responseMessage,
+            event_message_id: message.key.id || null,
+            group_id: groupId,
+            participant,
+            remote_jid: groupId,
+          },
+        });
+      }
+    }
+
     if (!eventResponse && !text) {
       continue;
     }
@@ -119,6 +197,13 @@ async function forwardInboundMessages(messages) {
       received_at: new Date(Number.isFinite(tsSeconds) ? tsSeconds * 1000 : Date.now()).toISOString(),
       group_id: groupId,
       group_name: message.chatName || null,
+      event_response: eventResponse
+        ? {
+            response: eventResponse.response,
+            normalized_response: text,
+            extra_guest_count: eventResponse.extraGuestCount ?? null,
+          }
+        : null,
       raw: {
         key: message.key,
         message: content,
@@ -141,6 +226,7 @@ async function forwardInboundMessages(messages) {
   }
 
   try {
+    forwardStats.attempts += 1;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
     const response = await fetch(`${ASSISTANT_API_URL.replace(/\/$/, "")}/internal/whatsapp/sidecar`, {
@@ -153,9 +239,14 @@ async function forwardInboundMessages(messages) {
       signal: controller.signal,
     });
     clearTimeout(timer);
+    forwardStats.lastStatus = response.status;
+    forwardStats.lastForwardedCount = normalized.length;
+    forwardStats.lastForwardedAt = new Date().toISOString();
 
     if (!response.ok) {
       const body = await response.text();
+      forwardStats.failures += 1;
+      forwardStats.lastError = body.slice(0, 500);
       log.warn(
         {
           status: response.status,
@@ -164,8 +255,14 @@ async function forwardInboundMessages(messages) {
         },
         "inbound sidecar forward failed"
       );
+    } else {
+      forwardStats.successes += 1;
+      forwardStats.lastError = null;
+      log.info({ count: normalized.length }, "inbound sidecar forward succeeded");
     }
   } catch (error) {
+    forwardStats.failures += 1;
+    forwardStats.lastError = error.message;
     log.warn({ error: error.message, count: normalized.length }, "inbound sidecar forward error");
   }
 }
@@ -225,6 +322,14 @@ async function connectWhatsApp() {
       void forwardInboundMessages(messages);
     });
 
+    sock.ev.on("messages.update", (updates) => {
+      const messages = (updates || []).map((item) => ({
+        key: item.key,
+        ...(item.update || {}),
+      }));
+      void forwardInboundMessages(messages);
+    });
+
     sock.ev.on("messaging-history.set", ({ messages }) => {
       void forwardInboundMessages(messages);
     });
@@ -244,6 +349,7 @@ app.get("/healthz", (_req, res) => {
     user: me,
     assistant_api_configured: Boolean(ASSISTANT_API_URL),
     auth_backend: authBackend,
+    forward_stats: forwardStats,
   });
 });
 

@@ -91,3 +91,35 @@ def test_extract_sidecar_messages_normalizes_group_event_response():
     assert msg.group_id == "120363408907704792@g.us"
     assert msg.group_name == "CHCC Members - T20 Cricket"
     assert msg.raw["group_id"] == "120363408907704792@g.us"
+
+
+def test_extract_sidecar_messages_preserves_snapshot_event_response():
+    payload = {
+        "messages": [
+            {
+                "external_id": "event-card:61411111111@s.whatsapp.net",
+                "from_external_id": "61411111111@s.whatsapp.net",
+                "message_type": "event_response",
+                "text": "going",
+                "received_at": "2026-06-09T09:21:00Z",
+                "group_id": "120363408907704792@g.us",
+                "event_response": {
+                    "response": 1,
+                    "normalized_response": "going",
+                    "event_message_id": "event-card",
+                },
+                "raw": {
+                    "event_message_id": "event-card",
+                    "participant": "61411111111@s.whatsapp.net",
+                },
+            }
+        ]
+    }
+
+    messages = extract_sidecar_messages(payload)
+    assert len(messages) == 1
+    msg = messages[0]
+    assert msg.message_type == "event_response"
+    assert msg.text == "going"
+    assert msg.raw["event_response"]["response"] == 1
+    assert msg.raw["event_response"]["event_message_id"] == "event-card"
