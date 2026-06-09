@@ -94,6 +94,75 @@ def extract_messages(payload: dict) -> list[NormalizedWhatsAppMessage]:
     return results
 
 
+def extract_sidecar_messages(payload: dict) -> list[NormalizedWhatsAppMessage]:
+    """
+    Normalize messages forwarded from the WhatsApp group sidecar.
+
+    Expected payload shape:
+      {
+        "messages": [
+          {
+            "external_id": "...",
+            "from_external_id": "...",
+            "display_name": "...",
+            "message_type": "text" | "event_response",
+            "text": "...",
+            "received_at": "2026-06-09T09:21:00Z",
+            "group_id": "120...@g.us",
+            "group_name": "CHCC Members - T20 Cricket",
+            "raw": {...}
+          }
+        ]
+      }
+    """
+    results: list[NormalizedWhatsAppMessage] = []
+    for item in payload.get("messages") or []:
+        group_id = str(item.get("group_id") or "").strip() or None
+        if not group_id:
+            continue
+
+        external_id = str(item.get("external_id") or item.get("id") or "").strip()
+        if not external_id:
+            continue
+
+        from_external_id = str(
+            item.get("from_external_id")
+            or item.get("participant")
+            or item.get("sender_jid")
+            or item.get("from")
+            or ""
+        ).strip()
+        if not from_external_id:
+            continue
+
+        received_at = _parse_received_at(item.get("received_at"))
+        message_type = str(item.get("message_type") or "unknown").strip() or "unknown"
+        text = item.get("text")
+        if text is not None:
+            text = str(text)
+        raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+
+        results.append(
+            NormalizedWhatsAppMessage(
+                external_id=external_id,
+                from_external_id=from_external_id,
+                display_name=str(item.get("display_name")).strip() if item.get("display_name") else None,
+                message_type=message_type,
+                text=text,
+                received_at=received_at,
+                raw=raw | {
+                    "group_id": group_id,
+                    "group_name": item.get("group_name"),
+                    "source": "sidecar",
+                    "event_response": item.get("event_response"),
+                },
+                group_id=group_id,
+                group_name=str(item.get("group_name")).strip() if item.get("group_name") else None,
+            )
+        )
+    return results
+
+
 async def persist_message(
     session: AsyncSession,
     message: NormalizedWhatsAppMessage,
@@ -181,3 +250,15 @@ def _message_time(timestamp: object) -> datetime:
         return as_utc_naive(datetime.fromtimestamp(int(str(timestamp)), tz=timezone.utc))
     except (TypeError, ValueError, OSError):
         return utc_now_naive()
+
+
+def _parse_received_at(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return as_utc_naive(value if value.tzinfo else value.replace(tzinfo=timezone.utc))
+    if isinstance(value, str) and value.strip():
+        text = value.strip().replace("Z", "+00:00")
+        try:
+            return as_utc_naive(datetime.fromisoformat(text))
+        except ValueError:
+            pass
+    return utc_now_naive()

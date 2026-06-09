@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 
-from app.services.whatsapp_ingest import extract_messages, signature_valid
+from app.services.whatsapp_ingest import extract_messages, extract_sidecar_messages, signature_valid
 
 
 def _payload():
@@ -61,3 +61,33 @@ def test_signature_rejects_bad_header():
         signature_header="sha256=bad",
         app_secret="app-secret",
     )
+
+
+def test_extract_sidecar_messages_normalizes_group_event_response():
+    payload = {
+        "messages": [
+            {
+                "external_id": "ABC123",
+                "from_external_id": "61411111111@s.whatsapp.net",
+                "display_name": "Asha",
+                "message_type": "event_response",
+                "text": "going",
+                "received_at": "2026-06-09T09:21:00Z",
+                "group_id": "120363408907704792@g.us",
+                "group_name": "CHCC Members - T20 Cricket",
+                "raw": {"event_response": {"response": 1, "extra_guest_count": 0}},
+            }
+        ]
+    }
+
+    messages = extract_sidecar_messages(payload)
+    assert len(messages) == 1
+    msg = messages[0]
+    assert msg.external_id == "ABC123"
+    assert msg.from_external_id == "61411111111@s.whatsapp.net"
+    assert msg.display_name == "Asha"
+    assert msg.message_type == "event_response"
+    assert msg.text == "going"
+    assert msg.group_id == "120363408907704792@g.us"
+    assert msg.group_name == "CHCC Members - T20 Cricket"
+    assert msg.raw["group_id"] == "120363408907704792@g.us"

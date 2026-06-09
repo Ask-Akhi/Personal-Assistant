@@ -14,6 +14,7 @@ const makeWASocket = require("@whiskeysockets/baileys").default;
 const PORT = Number(process.env.PORT || 8080);
 const AUTH_DIR = process.env.WA_AUTH_DIR || "./auth";
 const API_TOKEN = process.env.WHATSAPP_GROUP_SENDER_TOKEN || "";
+const ASSISTANT_API_URL = process.env.ASSISTANT_API_URL || process.env.WHATSAPP_INGEST_URL || "";
 
 const app = express();
 const log = pino({ level: process.env.LOG_LEVEL || "info" });
@@ -43,6 +44,122 @@ function normalizeGroupId(value) {
     throw new Error("group_id must be a WhatsApp group JID ending in @g.us");
   }
   return groupId;
+}
+
+function extractMessageText(message) {
+  const content = message?.message || {};
+  return (
+    content.conversation ||
+    content.extendedTextMessage?.text ||
+    content.imageMessage?.caption ||
+    content.videoMessage?.caption ||
+    content.documentMessage?.caption ||
+    content.buttonsResponseMessage?.selectedDisplayText ||
+    content.listResponseMessage?.title ||
+    content.templateButtonReplyMessage?.selectedDisplayText ||
+    null
+  );
+}
+
+function normalizeEventResponse(response) {
+  const raw = typeof response === "string" ? response.trim().toLowerCase() : response;
+  const map = {
+    0: "unknown",
+    1: "going",
+    2: "not_going",
+    3: "maybe",
+    going: "going",
+    yes: "going",
+    maybe: "maybe",
+    not_going: "not_going",
+    "not going": "not_going",
+    no: "not_going",
+  };
+  return map[raw] || map[String(raw).trim().toLowerCase()] || null;
+}
+
+async function forwardInboundMessages(messages) {
+  if (!ASSISTANT_API_URL) {
+    return;
+  }
+
+  const normalized = [];
+  for (const message of messages || []) {
+    if (!message?.key || message.key.fromMe) {
+      continue;
+    }
+
+    const groupId = String(message.key.remoteJid || "").trim();
+    if (!groupId.endsWith("@g.us")) {
+      continue;
+    }
+
+    const content = message.message || {};
+    const eventResponse = content.eventResponseMessage || null;
+    const text = eventResponse ? normalizeEventResponse(eventResponse.response) : extractMessageText(message);
+    if (!eventResponse && !text) {
+      continue;
+    }
+
+    const tsSeconds = Number(message.messageTimestamp || Math.floor(Date.now() / 1000));
+    normalized.push({
+      external_id: String(message.key.id || ""),
+      from_external_id: String(message.key.participant || message.key.remoteJid || ""),
+      display_name: message.pushName || null,
+      message_type: eventResponse ? "event_response" : "text",
+      text: text ? String(text) : null,
+      received_at: new Date(Number.isFinite(tsSeconds) ? tsSeconds * 1000 : Date.now()).toISOString(),
+      group_id: groupId,
+      group_name: message.chatName || null,
+      raw: {
+        key: message.key,
+        message: content,
+        pushName: message.pushName || null,
+        group_id: groupId,
+        participant: message.key.participant || null,
+        remote_jid: groupId,
+        event_response: eventResponse
+          ? {
+              response: eventResponse.response,
+              extra_guest_count: eventResponse.extraGuestCount ?? null,
+            }
+          : null,
+      },
+    });
+  }
+
+  if (!normalized.length) {
+    return;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    const response = await fetch(`${ASSISTANT_API_URL.replace(/\/$/, "")}/internal/whatsapp/sidecar`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
+      },
+      body: JSON.stringify({ messages: normalized }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+
+    if (!response.ok) {
+      const body = await response.text();
+      log.warn(
+        {
+          status: response.status,
+          body: body.slice(0, 500),
+          count: normalized.length,
+        },
+        "inbound sidecar forward failed"
+      );
+    }
+  } catch (error) {
+    log.warn({ error: error.message, count: normalized.length }, "inbound sidecar forward error");
+  }
 }
 
 async function connectWhatsApp() {
@@ -94,6 +211,14 @@ async function connectWhatsApp() {
         }
       }
     });
+
+    sock.ev.on("messages.upsert", ({ messages }) => {
+      void forwardInboundMessages(messages);
+    });
+
+    sock.ev.on("messaging-history.set", ({ messages }) => {
+      void forwardInboundMessages(messages);
+    });
   } catch (error) {
     log.error({ error: error.message }, "whatsapp connect failed");
     setTimeout(connectWhatsApp, 5000);
@@ -108,6 +233,7 @@ app.get("/healthz", (_req, res) => {
     connected,
     has_qr: Boolean(lastQr),
     user: me,
+    assistant_api_configured: Boolean(ASSISTANT_API_URL),
   });
 });
 
@@ -191,6 +317,9 @@ app.post("/send", requireAuth, sendGroupMessage);
 
 app.listen(PORT, () => {
   log.info({ port: PORT, authDir: AUTH_DIR }, "whatsapp group sender listening");
+  if (!ASSISTANT_API_URL) {
+    log.warn("ASSISTANT_API_URL is not set; inbound group RSVP syncing is disabled");
+  }
   connectWhatsApp();
 });
 

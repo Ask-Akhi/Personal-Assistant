@@ -33,6 +33,20 @@ import pytz
 
 AET = pytz.timezone("Australia/Sydney")
 
+_EVENT_RESPONSE_TO_RSVP: dict[object, RsvpStatus] = {
+    0: RsvpStatus.maybe,  # WhatsApp's UNKNOWN can still map to a soft maybe
+    1: RsvpStatus.yes,
+    2: RsvpStatus.no,
+    3: RsvpStatus.maybe,
+    "going": RsvpStatus.yes,
+    "yes": RsvpStatus.yes,
+    "yes_go": RsvpStatus.yes,
+    "maybe": RsvpStatus.maybe,
+    "not_going": RsvpStatus.no,
+    "not going": RsvpStatus.no,
+    "no": RsvpStatus.no,
+}
+
 # ── RSVP keyword classifier ──────────────────────────────────────────
 
 _YES_PATTERNS = [
@@ -102,6 +116,22 @@ async def get_active_event(session: AsyncSession) -> CricketEvent | None:
     result = await session.execute(
         select(CricketEvent)
         .where(CricketEvent.status == EventStatus.open)
+        .order_by(CricketEvent.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_active_event_for_group(session: AsyncSession, group_wa_id: str) -> CricketEvent | None:
+    """Return the most recently created open event for a specific WA group."""
+    if not group_wa_id:
+        return None
+    result = await session.execute(
+        select(CricketEvent)
+        .where(
+            CricketEvent.status == EventStatus.open,
+            CricketEvent.group_wa_id == group_wa_id,
+        )
         .order_by(CricketEvent.created_at.desc())
         .limit(1)
     )
@@ -292,14 +322,14 @@ async def handle_possible_rsvp(
     Check if this message is an RSVP for the active event.
     Returns True if handled as RSVP, False otherwise.
     """
-    if not inbound.text:
-        return False
-
-    event = await get_active_event(session)
+    group_wa_id = _extract_group_wa_id(inbound)
+    event = await get_active_event_for_group(session, group_wa_id) if group_wa_id else None
+    if not event:
+        event = await get_active_event(session)
     if not event:
         return False
 
-    status, is_wnbo = classify_rsvp(inbound.text)
+    status, is_wnbo = _classify_inbound_rsvp(inbound)
     if status is None:
         return False
 
@@ -328,6 +358,43 @@ async def handle_possible_rsvp(
     # Notify via Telegram
     await _notify_rsvp(event, contact, rsvp, is_wnbo)
     return True
+
+
+def _extract_group_wa_id(inbound: InboundMessage) -> str | None:
+    raw = inbound.raw or {}
+    for key in ("group_id", "remote_jid", "remoteJid"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.endswith("@g.us"):
+            return value
+    context = raw.get("context") or {}
+    value = context.get("group_id") or context.get("remote_jid") or context.get("remoteJid")
+    if isinstance(value, str) and value.endswith("@g.us"):
+        return value
+    return None
+
+
+def _classify_inbound_rsvp(inbound: InboundMessage) -> tuple[RsvpStatus | None, bool]:
+    raw = inbound.raw or {}
+    if inbound.message_type in {"event_response", "poll_vote"}:
+        response = raw.get("event_response")
+        if isinstance(response, dict):
+            response = response.get("response")
+        if response is None:
+            response = raw.get("response")
+        if response is None and inbound.text:
+            response = inbound.text
+        status = _EVENT_RESPONSE_TO_RSVP.get(response)
+        if status is None and response is not None:
+            status = _EVENT_RESPONSE_TO_RSVP.get(str(response).strip().lower())
+        if status is None:
+            return None, False
+        is_wnbo = status == RsvpStatus.wnbo
+        return status, is_wnbo
+
+    if not inbound.text:
+        return None, False
+
+    return classify_rsvp(inbound.text)
 
 
 async def _notify_rsvp(

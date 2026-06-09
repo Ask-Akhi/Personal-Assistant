@@ -111,6 +111,67 @@ async def _run_weekly_event_poster():
     await run()
 
 
+async def _ingest_whatsapp_messages(
+    *,
+    source: str,
+    messages,
+    mirror_to_telegram: bool,
+    auto_detect_event: bool,
+    draft_non_rsvp: bool,
+):
+    processed = 0
+    duplicates = 0
+
+    for message in messages:
+        async with session_scope() as s:
+            is_new = await idempotency.claim_event(
+                s,
+                source=source,
+                external_id=message.external_id,
+            )
+            if not is_new:
+                duplicates += 1
+                await audit.record(
+                    s,
+                    actor=f"webhook:{source}",
+                    action="inbound_duplicate",
+                    target=message.external_id,
+                )
+                continue
+
+            contact, inbound = await whatsapp_ingest.persist_message(s, message)
+            processed += 1
+            await audit.record(
+                s,
+                actor=f"webhook:{source}",
+                action="inbound_mirrored",
+                target=message.external_id,
+                payload={
+                    "contact_id": contact.id,
+                    "from": message.from_external_id,
+                    "type": message.message_type,
+                },
+            )
+
+        if inbound is None:
+            continue
+
+        if mirror_to_telegram:
+            await telegram_notify.send_admin_message(_mirror_text(contact, inbound))
+
+        if auto_detect_event:
+            async with session_scope() as s:
+                await event_manager.auto_detect_and_create_event(s, contact, inbound)
+
+        async with session_scope() as s:
+            is_rsvp = await event_manager.handle_possible_rsvp(s, contact, inbound)
+
+        if draft_non_rsvp and not is_rsvp:
+            await draft_manager.handle_inbound(contact, inbound)
+
+    return processed, duplicates
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # Auto-create tables on first run
@@ -220,54 +281,41 @@ async def wa_inbound(request: Request):
             )
         return {"ok": True, "messages": 0, "duplicate": not is_new}
 
-    processed = 0
-    duplicates = 0
-    for message in messages:
-        async with session_scope() as s:
-            is_new = await idempotency.claim_event(
-                s,
-                source="wa_cloud",
-                external_id=message.external_id,
-            )
-            if not is_new:
-                duplicates += 1
-                await audit.record(
-                    s,
-                    actor="webhook:wa_cloud",
-                    action="inbound_duplicate",
-                    target=message.external_id,
-                )
-                continue
+    processed, duplicates = await _ingest_whatsapp_messages(
+        source="wa_cloud",
+        messages=messages,
+        mirror_to_telegram=True,
+        auto_detect_event=True,
+        draft_non_rsvp=True,
+    )
 
-            contact, inbound = await whatsapp_ingest.persist_message(s, message)
-            processed += 1
-            await audit.record(
-                s,
-                actor="webhook:wa_cloud",
-                action="inbound_mirrored",
-                target=message.external_id,
-                payload={
-                    "contact_id": contact.id,
-                    "from": message.from_external_id,
-                    "type": message.message_type,
-                },
-            )
+    return {
+        "ok": True,
+        "messages": len(messages),
+        "processed": processed,
+        "duplicates": duplicates,
+    }
 
-        if inbound is not None:
-            await telegram_notify.send_admin_message(_mirror_text(contact, inbound))
 
-            # Phase 3: auto-detect event announcement (runs on every message)
-            async with session_scope() as s:
-                await event_manager.auto_detect_and_create_event(s, contact, inbound)
+@app.post("/internal/whatsapp/sidecar")
+async def wa_sidecar_inbound(request: Request):
+    """Internal ingestion for WhatsApp group-sidecar updates."""
+    expected = f"Bearer {settings.whatsapp_group_sender_token}"
+    if settings.whatsapp_group_sender_token and request.headers.get("authorization") != expected:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-            # Phase 2/3: check if this is an RSVP for the active event
-            async with session_scope() as s:
-                is_rsvp = await event_manager.handle_possible_rsvp(s, contact, inbound)
+    payload = await request.json()
+    messages = whatsapp_ingest.extract_sidecar_messages(payload)
+    if not messages:
+        return {"ok": True, "messages": 0, "processed": 0, "duplicates": 0}
 
-            if not is_rsvp:
-                # Normal message -- policy check + AI draft + Telegram approval card
-                await draft_manager.handle_inbound(contact, inbound)
-
+    processed, duplicates = await _ingest_whatsapp_messages(
+        source="wa_sidecar",
+        messages=messages,
+        mirror_to_telegram=False,
+        auto_detect_event=False,
+        draft_non_rsvp=False,
+    )
     return {
         "ok": True,
         "messages": len(messages),

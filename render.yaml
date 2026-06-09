@@ -37,6 +37,8 @@ services:
     envVars:
       - key: WHATSAPP_GROUP_SENDER_TOKEN
         sync: false
+      - key: ASSISTANT_API_URL
+        sync: false
       - key: WA_AUTH_DIR
         value: /data/auth
 

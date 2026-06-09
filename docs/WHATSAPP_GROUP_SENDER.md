@@ -58,6 +58,13 @@ WHATSAPP_GROUP_SENDER_URL=https://<group-sender-service>/send
 WHATSAPP_GROUP_SENDER_TOKEN=<same-secret-as-sidecar>
 ```
 
+Set this env var on the WhatsApp sidecar so it can forward group RSVP
+responses back into the Python app:
+
+```text
+ASSISTANT_API_URL=https://<assistant-api-service>
+```
+
 The Python app will automatically route any `@g.us` target through this sidecar.
 Phone-number targets still use WhatsApp Cloud API.
 
