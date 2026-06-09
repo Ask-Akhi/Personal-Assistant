@@ -27,6 +27,11 @@ from app.logging_setup import log
 from app.models import (
     Contact, CricketEvent, EventRsvp, EventStatus, InboundMessage, RsvpStatus
 )
+from app.services.time_utils import as_utc_aware
+
+import pytz
+
+AET = pytz.timezone("Australia/Sydney")
 
 # ── RSVP keyword classifier ──────────────────────────────────────────
 
@@ -243,7 +248,11 @@ async def build_calling_list(
         elif rsvp.status == RsvpStatus.maybe:
             maybe_list.append(name)
 
-    event_dt = event.event_at.strftime("%a, %b %-d at %-I:%M %p") if event.event_at else ""
+    event_dt = (
+        as_utc_aware(event.event_at).astimezone(AET).strftime("%a, %b %-d at %-I:%M %p AET")
+        if event.event_at
+        else ""
+    )
     venue_line = f"\n📍 {event.venue}" if event.venue else ""
 
     lines = [f"🏏 *{event.title} – Calling List*",

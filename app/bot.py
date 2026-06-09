@@ -40,6 +40,7 @@ from functools import wraps
 
 from datetime import datetime
 import httpx
+import pytz
 from sqlalchemy import select
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -60,9 +61,11 @@ from app.models import (
 )
 from app.services import audit, auth, draft_manager, event_manager, memory
 from app.services.quiet_hours import is_quiet_now
+from app.services.time_utils import as_utc_aware
 
 setup_logging()
 settings = get_settings()
+AET = pytz.timezone("Australia/Sydney")
 
 
 # - Decorators -
@@ -487,6 +490,10 @@ def _group_callback_data(event_id: int, group_id: str) -> str:
     return f"wagroup:set:{event_id}:{encoded}"
 
 
+def _fmt_aet(value: datetime, fmt: str) -> str:
+    return as_utc_aware(value).astimezone(AET).strftime(fmt)
+
+
 @allowlist_only
 async def cmd_wagroups(update: Update, _ctx):
     """Show live WhatsApp groups from the sidecar and allow choosing one for the active event."""
@@ -672,9 +679,9 @@ async def cmd_newevent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ *Event created!* (#{event_id})\n"
         f"🏏 *{title}*\n"
-        f"📅 {event_at.strftime('%a, %b %-d at %-I:%M %p')} UTC"
+        f"📅 {_fmt_aet(event_at.replace(tzinfo=None), '%a, %b %-d at %-I:%M %p AET')}"
         f"{venue_line}\n"
-        f"⏰ Cutoff: {cutoff_at.strftime('%a, %b %-d at %-I:%M %p')} UTC ({cutoff_hours}h before)"
+        f"⏰ Cutoff: {_fmt_aet(cutoff_at.replace(tzinfo=None), '%a, %b %-d at %-I:%M %p AET')} ({cutoff_hours}h before)"
         f"{group_line}\n\n"
         f"Now send the event announcement to your WhatsApp group. RSVPs will be tracked automatically!",
         parse_mode="Markdown"
@@ -694,8 +701,8 @@ async def cmd_votes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text(
             f"🏏 *{ev.title}* - No RSVPs yet.\n"
-            f"📅 {ev.event_at.strftime('%a, %b %-d')} | "
-            f"Cutoff: {ev.cutoff_at.strftime('%a, %b %-d %-I:%M %p') if ev.cutoff_at else 'N/A'} UTC",
+            f"📅 {_fmt_aet(ev.event_at, '%a, %b %-d')} | "
+            f"Cutoff: {_fmt_aet(ev.cutoff_at, '%a, %b %-d %-I:%M %p AET') if ev.cutoff_at else 'N/A'}",
             parse_mode="Markdown"
         )
         return
@@ -718,8 +725,8 @@ async def cmd_votes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not_coming:
         lines.append(f"❌ *Not coming ({len(not_coming)}):* {fmt(not_coming)}")
 
-    cutoff_str = ev.cutoff_at.strftime("%a %b %-d %-I:%M %p") if ev.cutoff_at else "N/A"
-    lines.append(f"\n⏰ Cutoff: {cutoff_str} UTC")
+    cutoff_str = _fmt_aet(ev.cutoff_at, "%a %b %-d %-I:%M %p AET") if ev.cutoff_at else "N/A"
+    lines.append(f"\n⏰ Cutoff: {cutoff_str}")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
