@@ -167,6 +167,10 @@ function normalizeEventResponse(response) {
   return map[raw] || map[String(raw).trim().toLowerCase()] || null;
 }
 
+function isBareRsvpText(text) {
+  return /^(yes|y|no|n|wnbo|w|maybe|m)$/i.test(String(text || "").trim());
+}
+
 function responseParticipant(response, fallbackGroupId) {
   const key = response?.eventResponseMessageKey || response?.key || {};
   return String(key.participant || key.participantPn || key.participantLid || "").trim();
@@ -201,12 +205,6 @@ async function forwardInboundMessages(messages) {
       continue;
     }
 
-    const hasEventResponses = Array.isArray(message.eventResponses) && message.eventResponses.length > 0;
-    if (message.key.fromMe && !hasEventResponses) {
-      forwardStats.skippedFromMe += 1;
-      continue;
-    }
-
     const groupId = String(message.key.remoteJid || "").trim();
     if (!groupId.endsWith("@g.us")) {
       forwardStats.skippedNonGroup += 1;
@@ -216,6 +214,11 @@ async function forwardInboundMessages(messages) {
     const content = message.message || {};
     const eventResponse = content.eventResponseMessage || null;
     const text = eventResponse ? normalizeEventResponse(eventResponse.response) : extractMessageText(message);
+    const hasEventResponses = Array.isArray(message.eventResponses) && message.eventResponses.length > 0;
+    if (message.key.fromMe && !hasEventResponses && !isBareRsvpText(text)) {
+      forwardStats.skippedFromMe += 1;
+      continue;
+    }
     if (Array.isArray(message.eventResponses)) {
       for (const response of message.eventResponses) {
         const responseMessage = response?.eventResponseMessage || {};
@@ -264,10 +267,14 @@ async function forwardInboundMessages(messages) {
     }
 
     const tsSeconds = Number(message.messageTimestamp || Math.floor(Date.now() / 1000));
-    const aliases = participantAliases(message.key);
+    const aliases = participantAliases({
+      ...message.key,
+      id: message.key.participant || message.key.participantPn || message.key.participantLid || me?.id || null,
+      jid: me?.id || null,
+    });
     normalized.push({
       external_id: String(message.key.id || ""),
-      from_external_id: String(message.key.participant || message.key.participantPn || message.key.participantLid || aliases[0] || ""),
+      from_external_id: String(message.key.participant || message.key.participantPn || message.key.participantLid || aliases[0] || me?.id || ""),
       participant_aliases: aliases,
       display_name: message.pushName || null,
       message_type: eventResponse ? "event_response" : "text",

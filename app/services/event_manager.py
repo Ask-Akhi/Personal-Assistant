@@ -533,7 +533,7 @@ async def _notify_rsvp(
 
     # Count current going
     async with session_scope() as s:
-        rows = await get_rsvps(s, event.id)
+        rows = await get_group_filtered_rsvps(s, event)
     going_count = sum(1 for r, _ in rows if r.status in (RsvpStatus.yes, RsvpStatus.wnbo))
     await send_admin_message(
         f"{icon} <b>{name}</b> → <code>{rsvp.status.value.upper()}</code>{wnbo_tag}\n"
