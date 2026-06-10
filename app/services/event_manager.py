@@ -286,9 +286,22 @@ async def get_group_filtered_rsvps(
     session: AsyncSession,
     event: CricketEvent,
 ) -> list[tuple[EventRsvp, Contact]]:
-    rows = await get_rsvps(session, event.id)
     if not event.group_wa_id:
-        return rows
+        return await get_rsvps(session, event.id)
+
+    row_result = await session.execute(
+        select(EventRsvp, Contact, InboundMessage)
+        .join(Contact, Contact.id == EventRsvp.contact_id)
+        .outerjoin(InboundMessage, InboundMessage.id == EventRsvp.inbound_id)
+        .where(EventRsvp.event_id == event.id)
+        .order_by(EventRsvp.created_at)
+    )
+    group_rows = [
+        (rsvp, contact, inbound)
+        for rsvp, contact, inbound in row_result.all()
+        if _is_real_rsvp_contact(contact)
+        and _rsvp_inbound_group_id(inbound) == event.group_wa_id
+    ]
 
     try:
         participant_ids = await fetch_group_participant_ids(event.group_wa_id)
@@ -299,15 +312,15 @@ async def get_group_filtered_rsvps(
             group_id=event.group_wa_id,
             error=str(exc),
         )
-        return rows
+        return [(rsvp, contact) for rsvp, contact, _inbound in group_rows]
 
     if not participant_ids:
-        return rows
+        return [(rsvp, contact) for rsvp, contact, _inbound in group_rows]
 
     return [
         (rsvp, contact)
-        for rsvp, contact in rows
-        if _rsvp_contact_aliases(contact) & participant_ids
+        for rsvp, contact, inbound in group_rows
+        if _rsvp_contact_aliases(contact, inbound) & participant_ids
     ]
 
 
@@ -322,6 +335,13 @@ def _is_real_rsvp_contact(contact: Contact) -> bool:
     if external_id.endswith("@broadcast"):
         return False
     return True
+
+
+def _rsvp_inbound_group_id(inbound: InboundMessage | None) -> str | None:
+    if not inbound or not isinstance(inbound.raw, dict):
+        return None
+    group_id = str(inbound.raw.get("group_id") or "").strip()
+    return group_id or None
 
 
 def _add_rsvp_alias(result: set[str], value: object) -> None:
