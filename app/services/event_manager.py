@@ -28,6 +28,7 @@ from app.models import (
     Contact, CricketEvent, EventRsvp, EventStatus, InboundMessage, RsvpStatus
 )
 from app.services.time_utils import as_utc_aware
+from app.services.wa_groups import fetch_group_participant_ids
 
 import pytz
 
@@ -281,6 +282,35 @@ async def get_rsvps(
     ]
 
 
+async def get_group_filtered_rsvps(
+    session: AsyncSession,
+    event: CricketEvent,
+) -> list[tuple[EventRsvp, Contact]]:
+    rows = await get_rsvps(session, event.id)
+    if not event.group_wa_id:
+        return rows
+
+    try:
+        participant_ids = await fetch_group_participant_ids(event.group_wa_id)
+    except Exception as exc:
+        log.warning(
+            "event_manager.group_participant_lookup_failed",
+            event_id=event.id,
+            group_id=event.group_wa_id,
+            error=str(exc),
+        )
+        return rows
+
+    if not participant_ids:
+        return rows
+
+    return [
+        (rsvp, contact)
+        for rsvp, contact in rows
+        if (contact.external_id or "").strip() in participant_ids
+    ]
+
+
 def _is_real_rsvp_contact(contact: Contact) -> bool:
     external_id = (contact.external_id or "").strip()
     if not external_id:
@@ -299,7 +329,7 @@ async def build_calling_list(
     event: CricketEvent,
 ) -> str:
     """Build the formatted Calling List message (English)."""
-    rows = await get_rsvps(session, event.id)
+    rows = await get_group_filtered_rsvps(session, event)
 
     going: list[str] = []
     not_coming: list[str] = []
@@ -375,6 +405,26 @@ async def handle_possible_rsvp(
             message_type=inbound.message_type,
         )
         return False
+    if event.group_wa_id:
+        try:
+            participant_ids = await fetch_group_participant_ids(event.group_wa_id)
+        except Exception as exc:
+            log.warning(
+                "event_manager.group_participant_lookup_failed",
+                event_id=event.id,
+                group_id=event.group_wa_id,
+                error=str(exc),
+            )
+            participant_ids = set()
+        if participant_ids and (contact.external_id or "").strip() not in participant_ids:
+            log.info(
+                "event_manager.rsvp_ignored_non_member",
+                event_id=event.id,
+                group_id=event.group_wa_id,
+                external_id=contact.external_id,
+                message_type=inbound.message_type,
+            )
+            return False
 
     status, is_wnbo = _classify_inbound_rsvp(inbound)
     if status is None:

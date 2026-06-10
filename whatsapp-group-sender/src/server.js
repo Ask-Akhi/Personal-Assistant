@@ -420,6 +420,40 @@ app.get("/groups", requireAuth, async (_req, res) => {
   }
 });
 
+app.get("/participants", requireAuth, async (req, res) => {
+  if (!connected || !sock) {
+    return res.status(503).json({ ok: false, error: "whatsapp_not_connected" });
+  }
+
+  const groupId = String(req.query.group_id || "").trim();
+  if (!groupId.endsWith("@g.us")) {
+    return res.status(400).json({ ok: false, error: "group_id must end with @g.us" });
+  }
+
+  try {
+    const groups = await sock.groupFetchAllParticipating();
+    const group = groups[groupId];
+    if (!group) {
+      return res.status(404).json({ ok: false, error: "group_not_found" });
+    }
+
+    const participants = (group.participants || []).map((participant) => ({
+      id: participant.id || participant.jid || null,
+      admin: participant.admin || null,
+    }));
+
+    return res.json({
+      ok: true,
+      group_id: groupId,
+      subject: group.subject || null,
+      participants,
+    });
+  } catch (error) {
+    log.error({ error: error.message, groupId }, "group participant list failed");
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 async function sendGroupMessage(req, res) {
   if (!connected || !sock) {
     return res.status(503).json({ ok: false, error: "whatsapp_not_connected" });

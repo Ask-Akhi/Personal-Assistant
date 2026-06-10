@@ -696,7 +696,7 @@ async def cmd_votes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not ev:
             await update.message.reply_text("No active event. Create one with /newevent")
             return
-        rows = await event_manager.get_rsvps(s, ev.id)
+        rows = await event_manager.get_group_filtered_rsvps(s, ev)
 
     if not rows:
         await update.message.reply_text(
