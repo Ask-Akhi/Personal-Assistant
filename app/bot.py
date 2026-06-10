@@ -791,6 +791,8 @@ async def cmd_rsvpdebug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"group: {ev.group_wa_id or 'not set'}",
         f"sidecar connected: {health.get('connected')}",
         f"sidecar history sync: {health.get('sync_full_history')}",
+        f"sidecar seen: messages={forward.get('seenMessages')} last_seen={forward.get('lastSeenAt')}",
+        f"sidecar skipped: no_key={forward.get('skippedNoKey')} from_me={forward.get('skippedFromMe')} non_group={forward.get('skippedNonGroup')} no_content={forward.get('skippedNoContent')} non_person={forward.get('skippedNonPerson')}",
         f"sidecar forwards: attempts={forward.get('attempts')} success={forward.get('successes')} last_count={forward.get('lastForwardedCount')} last_status={forward.get('lastStatus')}",
         f"participant aliases fetched: {participant_count}",
         f"db rows: raw={len(raw_rows)} real={len(real_rows)} group_filtered={len(filtered_rows)}",

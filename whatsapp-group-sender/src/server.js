@@ -36,11 +36,18 @@ let reconnecting = false;
 let authBackend = DATABASE_URL ? "postgres" : "filesystem";
 let authPool = null;
 let forwardStats = {
+  seenMessages: 0,
+  skippedNoKey: 0,
+  skippedFromMe: 0,
+  skippedNonGroup: 0,
+  skippedNoContent: 0,
+  skippedNonPerson: 0,
   attempts: 0,
   successes: 0,
   failures: 0,
   lastStatus: null,
   lastError: null,
+  lastSeenAt: null,
   lastForwardedAt: null,
   lastForwardedCount: 0,
 };
@@ -186,17 +193,23 @@ async function forwardInboundMessages(messages) {
 
   const normalized = [];
   for (const message of messages || []) {
+    forwardStats.seenMessages += 1;
+    forwardStats.lastSeenAt = new Date().toISOString();
+
     if (!message?.key) {
+      forwardStats.skippedNoKey += 1;
       continue;
     }
 
     const hasEventResponses = Array.isArray(message.eventResponses) && message.eventResponses.length > 0;
     if (message.key.fromMe && !hasEventResponses) {
+      forwardStats.skippedFromMe += 1;
       continue;
     }
 
     const groupId = String(message.key.remoteJid || "").trim();
     if (!groupId.endsWith("@g.us")) {
+      forwardStats.skippedNonGroup += 1;
       continue;
     }
 
@@ -211,6 +224,7 @@ async function forwardInboundMessages(messages) {
         const aliases = participantAliases(responseKey);
         const responseText = normalizeEventResponse(responseMessage.response);
         if ((!isRealParticipantId(participant) && !aliases.length) || !responseText || responseText === "unknown") {
+          forwardStats.skippedNonPerson += 1;
           continue;
         }
 
@@ -245,6 +259,7 @@ async function forwardInboundMessages(messages) {
     }
 
     if (!eventResponse && !text) {
+      forwardStats.skippedNoContent += 1;
       continue;
     }
 
@@ -484,10 +499,13 @@ app.get("/participants", requireAuth, async (req, res) => {
   }
 
   try {
-    const groups = await sock.groupFetchAllParticipating();
-    const group = groups[groupId];
+    let group = await sock.groupMetadata(groupId);
     if (!group) {
-      return res.status(404).json({ ok: false, error: "group_not_found" });
+      const groups = await sock.groupFetchAllParticipating();
+      group = groups[groupId];
+      if (!group) {
+        return res.status(404).json({ ok: false, error: "group_not_found" });
+      }
     }
 
     const participants = (group.participants || []).map((participant) => ({
