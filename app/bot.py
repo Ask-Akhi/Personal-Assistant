@@ -925,10 +925,11 @@ async def cmd_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"\U0001f4c5 {day_str}\n"
         f"\u23f0 {start_str} - {end_str}\n"
         f"\U0001f4cd Coolong Reserve\n\n"
-        f"Please reply:\n"
+        f"Please reply in this group message thread:\n"
         f"\u2705 *YES* - Coming\n"
         f"\U0001f3cf *WNBO* - Coming but Will Not Bowl\n"
-        f"\u274c *NO* - Can't make it\n\n"
+        f"\u274c *NO* - Can't make it\n"
+        f"\u26a0\ufe0f Please type the reply; WhatsApp event-card taps are not visible to the automation.\n\n"
         f"\U0001f4cb Calling list will be shared by {cutoff_str}. See you on the field! \U0001f3c6"
     )
 

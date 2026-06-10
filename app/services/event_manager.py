@@ -28,7 +28,6 @@ from app.models import (
     Contact, CricketEvent, EventRsvp, EventStatus, InboundMessage, RsvpStatus
 )
 from app.services.time_utils import as_utc_aware
-from app.services.wa_groups import fetch_group_participant_ids
 
 import pytz
 
@@ -303,25 +302,7 @@ async def get_group_filtered_rsvps(
         and _rsvp_inbound_group_id(inbound) == event.group_wa_id
     ]
 
-    try:
-        participant_ids = await fetch_group_participant_ids(event.group_wa_id)
-    except Exception as exc:
-        log.warning(
-            "event_manager.group_participant_lookup_failed",
-            event_id=event.id,
-            group_id=event.group_wa_id,
-            error=str(exc),
-        )
-        return [(rsvp, contact) for rsvp, contact, _inbound in group_rows]
-
-    if not participant_ids:
-        return [(rsvp, contact) for rsvp, contact, _inbound in group_rows]
-
-    return [
-        (rsvp, contact)
-        for rsvp, contact, inbound in group_rows
-        if _rsvp_contact_aliases(contact, inbound) & participant_ids
-    ]
+    return [(rsvp, contact) for rsvp, contact, _inbound in group_rows]
 
 
 def _is_real_rsvp_contact(contact: Contact) -> bool:
@@ -458,24 +439,13 @@ async def handle_possible_rsvp(
         )
         return False
     if event.group_wa_id:
-        try:
-            participant_ids = await fetch_group_participant_ids(event.group_wa_id)
-        except Exception as exc:
-            log.warning(
-                "event_manager.group_participant_lookup_failed",
-                event_id=event.id,
-                group_id=event.group_wa_id,
-                error=str(exc),
-            )
-            participant_ids = set()
-        contact_aliases = _rsvp_contact_aliases(contact, inbound)
-        if participant_ids and not (contact_aliases & participant_ids):
+        if group_wa_id != event.group_wa_id:
             log.info(
-                "event_manager.rsvp_ignored_non_member",
+                "event_manager.rsvp_ignored_wrong_group",
                 event_id=event.id,
                 group_id=event.group_wa_id,
+                inbound_group_id=group_wa_id,
                 external_id=contact.external_id,
-                aliases=sorted(contact_aliases),
                 message_type=inbound.message_type,
             )
             return False
