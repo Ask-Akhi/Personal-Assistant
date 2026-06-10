@@ -274,7 +274,22 @@ async def get_rsvps(
         .where(EventRsvp.event_id == event_id)
         .order_by(EventRsvp.created_at)
     )
-    return list(rows.all())
+    return [
+        (rsvp, contact)
+        for rsvp, contact in rows.all()
+        if _is_real_rsvp_contact(contact)
+    ]
+
+
+def _is_real_rsvp_contact(contact: Contact) -> bool:
+    external_id = (contact.external_id or "").strip()
+    if not external_id:
+        return False
+    if external_id.endswith("@g.us"):
+        return False
+    if external_id.endswith("@broadcast"):
+        return False
+    return True
 
 
 # ── Calling list builder ─────────────────────────────────────────────
@@ -351,6 +366,14 @@ async def handle_possible_rsvp(
     if not event:
         event = await get_active_event(session)
     if not event:
+        return False
+    if not _is_real_rsvp_contact(contact):
+        log.info(
+            "event_manager.rsvp_ignored_non_person",
+            event_id=event.id,
+            external_id=contact.external_id,
+            message_type=inbound.message_type,
+        )
         return False
 
     status, is_wnbo = _classify_inbound_rsvp(inbound)

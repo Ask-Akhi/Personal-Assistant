@@ -105,7 +105,21 @@ function normalizeEventResponse(response) {
 
 function responseParticipant(response, fallbackGroupId) {
   const key = response?.eventResponseMessageKey || response?.key || {};
-  return String(key.participant || key.participantPn || key.participantLid || key.remoteJid || fallbackGroupId || "").trim();
+  return String(key.participant || key.participantPn || key.participantLid || "").trim();
+}
+
+function isRealParticipantId(value) {
+  const jid = String(value || "").trim();
+  if (!jid) {
+    return false;
+  }
+  if (jid.endsWith("@g.us")) {
+    return false;
+  }
+  if (jid.endsWith("@broadcast")) {
+    return false;
+  }
+  return true;
 }
 
 function responseTimestamp(response, fallbackSeconds) {
@@ -151,7 +165,7 @@ async function forwardInboundMessages(messages) {
         const responseMessage = response?.eventResponseMessage || {};
         const participant = responseParticipant(response, groupId);
         const responseText = normalizeEventResponse(responseMessage.response);
-        if (!participant || !responseText || responseText === "unknown") {
+        if (!isRealParticipantId(participant) || !responseText || responseText === "unknown") {
           continue;
         }
 
@@ -190,7 +204,7 @@ async function forwardInboundMessages(messages) {
     const tsSeconds = Number(message.messageTimestamp || Math.floor(Date.now() / 1000));
     normalized.push({
       external_id: String(message.key.id || ""),
-      from_external_id: String(message.key.participant || message.key.remoteJid || ""),
+      from_external_id: String(message.key.participant || message.key.participantPn || message.key.participantLid || ""),
       display_name: message.pushName || null,
       message_type: eventResponse ? "event_response" : "text",
       text: text ? String(text) : null,
