@@ -142,6 +142,12 @@ def extract_sidecar_messages(payload: dict) -> list[NormalizedWhatsAppMessage]:
             text = str(text)
         raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
         event_response = item.get("event_response") or raw.get("event_response")
+        participant_aliases = (
+            item.get("participant_aliases")
+            or item.get("aliases")
+            or raw.get("participant_aliases")
+            or []
+        )
 
         results.append(
             NormalizedWhatsAppMessage(
@@ -156,6 +162,7 @@ def extract_sidecar_messages(payload: dict) -> list[NormalizedWhatsAppMessage]:
                     "group_name": item.get("group_name"),
                     "source": "sidecar",
                     "event_response": event_response,
+                    "participant_aliases": participant_aliases,
                 },
                 group_id=group_id,
                 group_name=str(item.get("group_name")).strip() if item.get("group_name") else None,

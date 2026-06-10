@@ -307,7 +307,7 @@ async def get_group_filtered_rsvps(
     return [
         (rsvp, contact)
         for rsvp, contact in rows
-        if (contact.external_id or "").strip() in participant_ids
+        if _rsvp_contact_aliases(contact) & participant_ids
     ]
 
 
@@ -320,6 +320,36 @@ def _is_real_rsvp_contact(contact: Contact) -> bool:
     if external_id.endswith("@broadcast"):
         return False
     return True
+
+
+def _add_rsvp_alias(result: set[str], value: object) -> None:
+    jid = str(value or "").strip()
+    if not jid:
+        return
+    result.add(jid)
+
+    if jid.isdigit() and len(jid) >= 8:
+        result.add(f"{jid}@s.whatsapp.net")
+
+
+def _rsvp_contact_aliases(
+    contact: Contact,
+    inbound: InboundMessage | None = None,
+) -> set[str]:
+    result: set[str] = set()
+    _add_rsvp_alias(result, contact.external_id)
+
+    raw = inbound.raw if inbound and isinstance(inbound.raw, dict) else {}
+    aliases = raw.get("participant_aliases") or []
+    if isinstance(aliases, list):
+        for alias in aliases:
+            _add_rsvp_alias(result, alias)
+
+    key = raw.get("key") if isinstance(raw.get("key"), dict) else {}
+    for field in ("participant", "participantPn", "participantLid", "jid", "lid", "id"):
+        _add_rsvp_alias(result, key.get(field))
+
+    return result
 
 
 # ── Calling list builder ─────────────────────────────────────────────
@@ -416,12 +446,14 @@ async def handle_possible_rsvp(
                 error=str(exc),
             )
             participant_ids = set()
-        if participant_ids and (contact.external_id or "").strip() not in participant_ids:
+        contact_aliases = _rsvp_contact_aliases(contact, inbound)
+        if participant_ids and not (contact_aliases & participant_ids):
             log.info(
                 "event_manager.rsvp_ignored_non_member",
                 event_id=event.id,
                 group_id=event.group_wa_id,
                 external_id=contact.external_id,
+                aliases=sorted(contact_aliases),
                 message_type=inbound.message_type,
             )
             return False

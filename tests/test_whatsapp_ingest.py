@@ -75,6 +75,10 @@ def test_extract_sidecar_messages_normalizes_group_event_response():
                 "received_at": "2026-06-09T09:21:00Z",
                 "group_id": "120363408907704792@g.us",
                 "group_name": "CHCC Members - T20 Cricket",
+                "participant_aliases": [
+                    "111111111111111@lid",
+                    "61411111111@s.whatsapp.net",
+                ],
                 "raw": {"event_response": {"response": 1, "extra_guest_count": 0}},
             }
         ]
@@ -91,6 +95,7 @@ def test_extract_sidecar_messages_normalizes_group_event_response():
     assert msg.group_id == "120363408907704792@g.us"
     assert msg.group_name == "CHCC Members - T20 Cricket"
     assert msg.raw["group_id"] == "120363408907704792@g.us"
+    assert "61411111111@s.whatsapp.net" in msg.raw["participant_aliases"]
 
 
 def test_extract_sidecar_messages_preserves_snapshot_event_response():

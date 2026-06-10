@@ -21,6 +21,43 @@ def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _add_participant_id(result: set[str], value: object) -> None:
+    jid = str(value or "").strip()
+    if not jid:
+        return
+    result.add(jid)
+
+    if jid.isdigit() and len(jid) >= 8:
+        result.add(f"{jid}@s.whatsapp.net")
+
+
+def participant_ids_from_payload(data: dict) -> set[str]:
+    participants = data.get("participants") or []
+    if not isinstance(participants, list):
+        return set()
+
+    result: set[str] = set()
+    for item in participants:
+        if not isinstance(item, dict):
+            continue
+        for key in (
+            "id",
+            "jid",
+            "lid",
+            "participant",
+            "participantPn",
+            "participantLid",
+        ):
+            _add_participant_id(result, item.get(key))
+
+        aliases = item.get("aliases") or []
+        if isinstance(aliases, list):
+            for alias in aliases:
+                _add_participant_id(result, alias)
+
+    return result
+
+
 async def fetch_group_participant_ids(group_id: str) -> set[str]:
     base_url = _sidecar_base_url()
     if not base_url or not group_id:
@@ -39,15 +76,4 @@ async def fetch_group_participant_ids(group_id: str) -> set[str]:
         )
 
     data = response.json()
-    participants = data.get("participants") or []
-    if not isinstance(participants, list):
-        return set()
-
-    result: set[str] = set()
-    for item in participants:
-        if not isinstance(item, dict):
-            continue
-        jid = str(item.get("id") or "").strip()
-        if jid:
-            result.add(jid)
-    return result
+    return participant_ids_from_payload(data)

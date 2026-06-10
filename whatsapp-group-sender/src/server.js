@@ -63,6 +63,62 @@ function normalizeGroupId(value) {
   return groupId;
 }
 
+function isRealParticipantId(value) {
+  const jid = String(value || "").trim();
+  if (!jid) {
+    return false;
+  }
+  if (jid.endsWith("@g.us")) {
+    return false;
+  }
+  if (jid.endsWith("@broadcast")) {
+    return false;
+  }
+  return true;
+}
+
+function addParticipantAlias(aliases, value) {
+  const jid = String(value || "").trim();
+  if (!jid) {
+    return;
+  }
+  if (isRealParticipantId(jid)) {
+    aliases.add(jid);
+  }
+
+  const barePhone = jid.replace(/\D/g, "");
+  if (barePhone.length >= 8 && jid === barePhone) {
+    aliases.add(`${barePhone}@s.whatsapp.net`);
+  }
+}
+
+function participantAliases(source) {
+  const aliases = new Set();
+  const explicitFields = [
+    "id",
+    "jid",
+    "lid",
+    "participant",
+    "participantPn",
+    "participantLid",
+    "remoteJidAlt",
+    "senderPn",
+    "senderLid",
+  ];
+
+  for (const field of explicitFields) {
+    addParticipantAlias(aliases, source?.[field]);
+  }
+
+  for (const value of Object.values(source || {})) {
+    if (typeof value === "string" && value.includes("@")) {
+      addParticipantAlias(aliases, value);
+    }
+  }
+
+  return [...aliases];
+}
+
 function extractMessageText(message) {
   const content = message?.message || {};
   return (
@@ -108,20 +164,6 @@ function responseParticipant(response, fallbackGroupId) {
   return String(key.participant || key.participantPn || key.participantLid || "").trim();
 }
 
-function isRealParticipantId(value) {
-  const jid = String(value || "").trim();
-  if (!jid) {
-    return false;
-  }
-  if (jid.endsWith("@g.us")) {
-    return false;
-  }
-  if (jid.endsWith("@broadcast")) {
-    return false;
-  }
-  return true;
-}
-
 function responseTimestamp(response, fallbackSeconds) {
   const raw = response?.timestampMs || response?.eventResponseMessage?.timestampMs || fallbackSeconds * 1000;
   const n = Number(raw);
@@ -163,15 +205,18 @@ async function forwardInboundMessages(messages) {
     if (Array.isArray(message.eventResponses)) {
       for (const response of message.eventResponses) {
         const responseMessage = response?.eventResponseMessage || {};
+        const responseKey = response?.eventResponseMessageKey || response?.key || {};
         const participant = responseParticipant(response, groupId);
+        const aliases = participantAliases(responseKey);
         const responseText = normalizeEventResponse(responseMessage.response);
-        if (!isRealParticipantId(participant) || !responseText || responseText === "unknown") {
+        if ((!isRealParticipantId(participant) && !aliases.length) || !responseText || responseText === "unknown") {
           continue;
         }
 
         normalized.push({
           external_id: eventResponseExternalId(response, message.key.id, participant),
-          from_external_id: participant,
+          from_external_id: participant || aliases[0],
+          participant_aliases: aliases,
           display_name: null,
           message_type: "event_response",
           text: responseText,
@@ -185,12 +230,13 @@ async function forwardInboundMessages(messages) {
             event_message_id: message.key.id || null,
           },
           raw: {
-            key: response?.eventResponseMessageKey || null,
+            key: responseKey || null,
             event_key: message.key,
             event_response: responseMessage,
             event_message_id: message.key.id || null,
             group_id: groupId,
-            participant,
+            participant: participant || aliases[0] || null,
+            participant_aliases: aliases,
             remote_jid: groupId,
           },
         });
@@ -202,9 +248,11 @@ async function forwardInboundMessages(messages) {
     }
 
     const tsSeconds = Number(message.messageTimestamp || Math.floor(Date.now() / 1000));
+    const aliases = participantAliases(message.key);
     normalized.push({
       external_id: String(message.key.id || ""),
-      from_external_id: String(message.key.participant || message.key.participantPn || message.key.participantLid || ""),
+      from_external_id: String(message.key.participant || message.key.participantPn || message.key.participantLid || aliases[0] || ""),
+      participant_aliases: aliases,
       display_name: message.pushName || null,
       message_type: eventResponse ? "event_response" : "text",
       text: text ? String(text) : null,
@@ -224,6 +272,7 @@ async function forwardInboundMessages(messages) {
         pushName: message.pushName || null,
         group_id: groupId,
         participant: message.key.participant || null,
+        participant_aliases: aliases,
         remote_jid: groupId,
         event_response: eventResponse
           ? {
@@ -439,6 +488,7 @@ app.get("/participants", requireAuth, async (req, res) => {
 
     const participants = (group.participants || []).map((participant) => ({
       id: participant.id || participant.jid || null,
+      aliases: participantAliases(participant),
       admin: participant.admin || null,
     }));
 
