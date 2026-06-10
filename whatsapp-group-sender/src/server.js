@@ -21,6 +21,7 @@ const AUTH_DIR = process.env.WA_AUTH_DIR || "./auth";
 const API_TOKEN = process.env.WHATSAPP_GROUP_SENDER_TOKEN || "";
 const ASSISTANT_API_URL = process.env.ASSISTANT_API_URL || process.env.WHATSAPP_INGEST_URL || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
+const SYNC_FULL_HISTORY = String(process.env.WA_SYNC_FULL_HISTORY || "true").toLowerCase() !== "false";
 
 const app = express();
 const log = pino({ level: process.env.LOG_LEVEL || "info" });
@@ -344,9 +345,11 @@ async function connectWhatsApp() {
 
     sock = makeWASocket({
       auth: state,
-      browser: ["PI Assistant", "Chrome", "1.0.0"],
+      browser: ["Windows", "Chrome", "10.0"],
       logger: log.child({ component: "baileys" }),
       printQRInTerminal: false,
+      syncFullHistory: SYNC_FULL_HISTORY,
+      shouldSyncHistoryMessage: () => true,
       version,
     });
 
@@ -412,6 +415,7 @@ app.get("/healthz", (_req, res) => {
     user: me,
     assistant_api_configured: Boolean(ASSISTANT_API_URL),
     auth_backend: authBackend,
+    sync_full_history: SYNC_FULL_HISTORY,
     forward_stats: forwardStats,
   });
 });

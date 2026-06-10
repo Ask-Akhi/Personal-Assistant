@@ -17,6 +17,7 @@ Commands (Phase 1 + 2 + 3):
                           - create a new cricket/sports event
   /announce [group_wa_id] - post this Saturday's event NOW (creates if needed, re-sends if exists)
   /votes                  - show live RSVPs for the active event
+  /rsvpdebug              - show RSVP ingestion/filter diagnostics
   /callinglist            - preview + manually send calling list
   /wagroups               - list live WhatsApp groups from the sidecar
   /closeevent             - cancel the active event without sending
@@ -485,6 +486,21 @@ async def _fetch_live_groups() -> list[dict]:
     return [g for g in groups if isinstance(g, dict)]
 
 
+async def _fetch_sidecar_health() -> dict:
+    base_url = _sidecar_base_url()
+    if not base_url:
+        raise RuntimeError("WHATSAPP_GROUP_SENDER_URL not configured")
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.get(f"{base_url}/healthz")
+    if response.is_error:
+        raise RuntimeError(
+            f"Group sender health error: HTTP {response.status_code} {response.text[:200]}"
+        )
+    data = response.json()
+    return data if isinstance(data, dict) else {}
+
+
 def _group_callback_data(event_id: int, group_id: str) -> str:
     encoded = base64.urlsafe_b64encode(group_id.encode("utf-8")).decode("ascii").rstrip("=")
     return f"wagroup:set:{event_id}:{encoded}"
@@ -729,6 +745,65 @@ async def cmd_votes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines.append(f"\n⏰ Cutoff: {cutoff_str}")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+@allowlist_only
+async def cmd_rsvpdebug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show RSVP ingestion/filter diagnostics for the current event."""
+    from app.services.wa_groups import fetch_group_participant_ids
+
+    async with session_scope() as s:
+        ev = await event_manager.resolve_event_for_control_plane(s)
+        if not ev:
+            await update.message.reply_text("No active or recent event found.")
+            return
+
+        raw_rows = (await s.execute(
+            select(EventRsvp, Contact)
+            .join(Contact, Contact.id == EventRsvp.contact_id)
+            .where(EventRsvp.event_id == ev.id)
+            .order_by(EventRsvp.created_at)
+        )).all()
+        real_rows = await event_manager.get_rsvps(s, ev.id)
+        filtered_rows = await event_manager.get_group_filtered_rsvps(s, ev)
+
+    participant_count = "n/a"
+    participant_error = None
+    if ev.group_wa_id:
+        try:
+            participant_count = str(len(await fetch_group_participant_ids(ev.group_wa_id)))
+        except Exception as exc:
+            participant_error = str(exc)[:160]
+
+    try:
+        health = await _fetch_sidecar_health()
+    except Exception as exc:
+        health = {"error": str(exc)[:160]}
+
+    forward = health.get("forward_stats") if isinstance(health.get("forward_stats"), dict) else {}
+    sample = []
+    for rsvp, contact in raw_rows[:8]:
+        sample.append(f"- {contact.display_name or contact.external_id}: {rsvp.status.value} [{contact.external_id}]")
+
+    lines = [
+        f"RSVP debug for event #{ev.id}",
+        f"title: {ev.title}",
+        f"group: {ev.group_wa_id or 'not set'}",
+        f"sidecar connected: {health.get('connected')}",
+        f"sidecar history sync: {health.get('sync_full_history')}",
+        f"sidecar forwards: attempts={forward.get('attempts')} success={forward.get('successes')} last_count={forward.get('lastForwardedCount')} last_status={forward.get('lastStatus')}",
+        f"participant aliases fetched: {participant_count}",
+        f"db rows: raw={len(raw_rows)} real={len(real_rows)} group_filtered={len(filtered_rows)}",
+    ]
+    if participant_error:
+        lines.append(f"participant error: {participant_error}")
+    if health.get("error"):
+        lines.append(f"health error: {health['error']}")
+    if sample:
+        lines.append("sample raw rows:")
+        lines.extend(sample)
+
+    await update.message.reply_text("\n".join(lines[:24]))
 
 
 @allowlist_only
@@ -1150,6 +1225,7 @@ def build_app():
     app.add_handler(CommandHandler("newevent",       cmd_newevent))
     app.add_handler(CommandHandler("announce",       cmd_announce))
     app.add_handler(CommandHandler("votes",          cmd_votes))
+    app.add_handler(CommandHandler("rsvpdebug",      cmd_rsvpdebug))
     app.add_handler(CommandHandler("callinglist",    cmd_callinglist))
     app.add_handler(CommandHandler("wagroups",       cmd_wagroups))
     app.add_handler(CommandHandler("closeevent",      cmd_closeevent))

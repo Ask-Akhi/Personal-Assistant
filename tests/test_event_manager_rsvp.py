@@ -7,6 +7,16 @@ def test_real_rsvp_contact_accepts_person_jid():
     assert _is_real_rsvp_contact(contact) is True
 
 
+def test_real_rsvp_contact_accepts_bare_phone_number():
+    contact = Contact(external_id="61411111111", display_name="Asha")
+    assert _is_real_rsvp_contact(contact) is True
+
+
+def test_real_rsvp_contact_rejects_plain_username():
+    contact = Contact(external_id="ptebydrahmed", display_name="ptebydrahmed")
+    assert _is_real_rsvp_contact(contact) is False
+
+
 def test_real_rsvp_contact_rejects_group_jid():
     contact = Contact(external_id="120363408907704792@g.us", display_name="CHCC Members")
     assert _is_real_rsvp_contact(contact) is False

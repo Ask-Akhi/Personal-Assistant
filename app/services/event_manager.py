@@ -315,6 +315,8 @@ def _is_real_rsvp_contact(contact: Contact) -> bool:
     external_id = (contact.external_id or "").strip()
     if not external_id:
         return False
+    if not external_id.isdigit() and "@" not in external_id:
+        return False
     if external_id.endswith("@g.us"):
         return False
     if external_id.endswith("@broadcast"):
