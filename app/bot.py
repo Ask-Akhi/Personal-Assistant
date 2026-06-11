@@ -554,15 +554,23 @@ async def cmd_wagroups(update: Update, _ctx):
         return
 
     rows = []
-    for group in groups[:20]:
+    for group in groups[:24]:
         group_id = str(group.get("id") or "").strip()
         subject = str(group.get("subject") or "Unknown").strip()
         participants = group.get("participants") or 0
         if not group_id.endswith("@g.us"):
             continue
+        if group.get("is_community"):
+            # Community container — can't send messages here; shown greyed out
+            label = f"🏘️ {subject[:24]} (community)"
+        elif group.get("community_jid"):
+            # Sub-group inside a community — this is the correct target
+            label = f"📋 {subject[:26]} ({participants})"
+        else:
+            label = f"{subject[:28]} ({participants})"
         rows.append([
             InlineKeyboardButton(
-                f"{subject[:28]} ({participants})",
+                label,
                 callback_data=_group_callback_data(ev.id, group_id),
             )
         ])
@@ -572,9 +580,42 @@ async def cmd_wagroups(update: Update, _ctx):
         return
 
     await update.message.reply_text(
-        f"Choose the WhatsApp group to bind to *{ev.title}*:",
+        f"Choose the WhatsApp group to bind to *{ev.title}*:\n"
+        f"_(📋 = sub-group inside a community — use this one)_",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(rows[:20]),
+    )
+
+
+@allowlist_only
+async def cmd_groupdebug(update: Update, _ctx):
+    """Show raw group list from sidecar including JIDs and community flags."""
+    try:
+        groups = await _fetch_live_groups()
+    except Exception as exc:
+        await update.message.reply_text(f"⚠️ {exc}", parse_mode="HTML")
+        return
+
+    if not groups:
+        await update.message.reply_text("No groups returned.")
+        return
+
+    lines = []
+    for g in groups[:30]:
+        gid = g.get("id", "?")
+        subj = g.get("subject", "?")
+        pts = g.get("participants", 0)
+        flags = []
+        if g.get("is_community"):
+            flags.append("COMMUNITY")
+        if g.get("community_jid"):
+            flags.append(f"sub-of:{g['community_jid'][:20]}")
+        flag_str = f" [{', '.join(flags)}]" if flags else ""
+        lines.append(f"<code>{gid}</code>\n  {subj} ({pts}){flag_str}")
+
+    await update.message.reply_text(
+        "<b>WA Groups (raw):</b>\n\n" + "\n\n".join(lines),
+        parse_mode="HTML",
     )
 
 
@@ -597,7 +638,7 @@ async def handle_wagroup_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     try:
         groups = await _fetch_live_groups()
         selected = next((g for g in groups if str(g.get("id") or "") == group_id), {})
-        group_name = str(selected.get("subject") or group_id)
+        group_name = str(selected.get("subject") or group_id).lstrip("↳ ").strip()
     except Exception:
         group_name = group_id
 
@@ -1358,6 +1399,7 @@ def build_app():
     app.add_handler(CommandHandler("rsvpdebug",      cmd_rsvpdebug))
     app.add_handler(CommandHandler("callinglist",    cmd_callinglist))
     app.add_handler(CommandHandler("wagroups",       cmd_wagroups))
+    app.add_handler(CommandHandler("groupdebug",     cmd_groupdebug))
     app.add_handler(CommandHandler("sethost",         cmd_sethost))
     app.add_handler(CommandHandler("closeevent",      cmd_closeevent))
     app.add_handler(CommandHandler("groups",          cmd_groups))
