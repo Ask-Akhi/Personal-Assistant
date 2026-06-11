@@ -589,14 +589,25 @@ app.get("/groups", requireAuth, async (_req, res) => {
         is_community: isCommunity,
       });
 
-      // Expand sub-groups of a WhatsApp Community.
-      // groupFetchAllParticipating() returns the community container but not
-      // sub-groups the linked account was never individually added to.
-      // group.groups contains the sub-group JID list when available.
-      const subGroupJids = Array.isArray(group.groups) ? group.groups : [];
+      if (!isCommunity) continue;
+
+      // For community containers, explicitly fetch full metadata to get sub-group list.
+      // groupFetchAllParticipating() does NOT populate group.groups — we must call
+      // groupMetadata() separately to get the groups[] array.
+      let communityMeta = null;
+      try {
+        communityMeta = await sock.groupMetadata(group.id);
+      } catch (_e) {
+        log.warn({ community: group.id }, "could not fetch community metadata");
+      }
+
+      const subGroupJids = Array.isArray(communityMeta?.groups)
+        ? communityMeta.groups
+        : (Array.isArray(group.groups) ? group.groups : []);
+
       for (const subJid of subGroupJids) {
         if (!String(subJid).endsWith("@g.us")) continue;
-        // Skip if already in the top-level list (account IS a member of this sub-group)
+        // Skip if account is already in this sub-group (it appears in the main list)
         if (groups[subJid]) continue;
         try {
           const meta = await sock.groupMetadata(subJid);
@@ -605,15 +616,17 @@ app.get("/groups", requireAuth, async (_req, res) => {
             subject: `↳ ${meta.subject || subJid}`,
             participants: meta.participants?.length || 0,
             is_community: false,
+            not_member: true,
             community_jid: group.id,
             community_subject: group.subject,
           });
         } catch (_e) {
           result.push({
             id: subJid,
-            subject: `↳ sub-group`,
+            subject: `↳ sub-group (${subJid})`,
             participants: 0,
             is_community: false,
+            not_member: true,
             community_jid: group.id,
             community_subject: group.subject,
           });

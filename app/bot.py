@@ -610,6 +610,8 @@ async def cmd_groupdebug(update: Update, _ctx):
             flags.append("COMMUNITY")
         if g.get("community_jid"):
             flags.append(f"sub-of:{g['community_jid'][:20]}")
+        if g.get("not_member"):
+            flags.append("NOT-MEMBER")
         flag_str = f" [{', '.join(flags)}]" if flags else ""
         lines.append(f"<code>{gid}</code>\n  {subj} ({pts}){flag_str}")
 
