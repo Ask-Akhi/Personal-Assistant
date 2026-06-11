@@ -125,6 +125,50 @@ async def auto_register_group(
     return group_id
 
 
+async def set_group_for_task(
+    session: AsyncSession,
+    group_id: str,
+    task: str,
+    group_name: str | None = None,
+) -> None:
+    """Manually bind a group JID to a task, removing that task from any previous binding."""
+    from sqlalchemy import select as _select
+
+    rows = (await session.execute(
+        _select(Memory).where(
+            Memory.kind == MemoryKind.assistant_rule,
+            Memory.subject == "wa_group",
+        )
+    )).scalars().all()
+
+    # Strip this task from any other group that currently has it
+    for row in rows:
+        if row.key == group_id:
+            continue
+        if f"task:{task}" in row.value:
+            old_name = row.value.split(" | task:")[0].strip()
+            row.value = f"{old_name} | task:unknown"
+
+    # Upsert the target group entry
+    target = next((r for r in rows if r.key == group_id), None)
+    if target:
+        old_name = target.value.split(" | task:")[0].strip()
+        final_name = group_name or old_name or group_id
+        target.value = f"{final_name} | task:{task}"
+    else:
+        name = group_name or group_id
+        entry = Memory(
+            kind=MemoryKind.assistant_rule,
+            subject="wa_group",
+            key=group_id,
+            value=f"{name} | task:{task}",
+        )
+        session.add(entry)
+
+    await session.flush()
+    log.info("group_registry.manual_bind", group_id=group_id, task=task)
+
+
 async def get_group_for_task(session: AsyncSession, task: str) -> str | None:
     """Return the WA group ID registered for a given task key."""
     rows = (await session.execute(

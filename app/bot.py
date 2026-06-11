@@ -1330,6 +1330,39 @@ async def cmd_sethost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @allowlist_only
+async def cmd_setgroupid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/setgroupid <jid> — bind a WhatsApp group JID directly to the current event and weekly_cricket task."""
+    jid = (ctx.args[0] if ctx.args else "").strip()
+    if not jid or not jid.endswith("@g.us"):
+        await update.message.reply_text(
+            "Usage: <code>/setgroupid 1234567890@g.us</code>\n"
+            "Sets this JID on the current event and marks it as the weekly_cricket group.",
+            parse_mode="HTML",
+        )
+        return
+
+    from app.services.group_registry import set_group_for_task
+    async with session_scope() as s:
+        ev = await event_manager.resolve_event_for_control_plane(s)
+        if not ev:
+            await update.message.reply_text("No active or recent event found.")
+            return
+        old_jid = ev.group_wa_id
+        ev.group_wa_id = jid
+        ev_title = ev.title
+        await set_group_for_task(s, jid, "weekly_cricket", "CHCC Members")
+
+    await update.message.reply_text(
+        f"✅ Group JID updated for <b>{ev_title}</b>\n"
+        f"Old: <code>{old_jid or 'none'}</code>\n"
+        f"New: <code>{jid}</code>\n\n"
+        f"Registry: <code>weekly_cricket</code> → <code>{jid}</code>\n"
+        f"Now run /announce to send the announcement to the correct group.",
+        parse_mode="HTML",
+    )
+
+
+@allowlist_only
 async def cmd_closeevent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Manually close the active event without sending the calling list."""
     uid = update.effective_user.id
@@ -1403,6 +1436,7 @@ def build_app():
     app.add_handler(CommandHandler("wagroups",       cmd_wagroups))
     app.add_handler(CommandHandler("groupdebug",     cmd_groupdebug))
     app.add_handler(CommandHandler("sethost",         cmd_sethost))
+    app.add_handler(CommandHandler("setgroupid",      cmd_setgroupid))
     app.add_handler(CommandHandler("closeevent",      cmd_closeevent))
     app.add_handler(CommandHandler("groups",          cmd_groups))
     app.add_handler(CommandHandler("testrsvp",        cmd_testrsvp))
