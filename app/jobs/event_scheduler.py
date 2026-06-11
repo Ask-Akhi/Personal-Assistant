@@ -83,10 +83,13 @@ async def _process_event(event: CricketEvent) -> None:
     settings = get_settings()
 
     async with session_scope() as s:
+        db_event = await s.get(CricketEvent, event.id)
+        if db_event:
+            await event_manager.backfill_event_rsvps_from_inbounds(s, db_event)
+            event = db_event
         calling_list = await event_manager.build_calling_list(s, event)
 
         # Save calling list text on event row
-        db_event = await s.get(CricketEvent, event.id)
         if db_event:
             db_event.calling_list_text = calling_list
 
@@ -152,6 +155,7 @@ async def _auto_send_if_not_cancelled(event_id: int, calling_list: str) -> None:
     from app.services.telegram_notify import send_admin_message
 
     event_title = None
+    group_wa_id = None
     async with session_scope() as s:
         db_event = await s.get(CricketEvent, event_id)
         if not db_event:
@@ -163,6 +167,20 @@ async def _auto_send_if_not_cancelled(event_id: int, calling_list: str) -> None:
             log.info("event_scheduler.send_cancelled", event_id=event_id)
             return
 
+        group_wa_id = db_event.group_wa_id
+
+        # Fallback: look up from group registry if not set on the event row
+        if not group_wa_id:
+            from app.services.group_registry import get_group_for_task
+            group_wa_id = await get_group_for_task(s, "weekly_cricket")
+            if group_wa_id:
+                db_event.group_wa_id = group_wa_id
+                log.info(
+                    "event_scheduler.group_resolved_from_registry",
+                    event_id=event_id,
+                    group_id=group_wa_id,
+                )
+
         await audit.record(
             s,
             actor="event_scheduler",
@@ -171,10 +189,10 @@ async def _auto_send_if_not_cancelled(event_id: int, calling_list: str) -> None:
         )
 
     send_failed = False
-    if db_event.group_wa_id:
+    if group_wa_id:
         try:
-            await wa_sender.send_text(db_event.group_wa_id, calling_list)
-            log.info("event_scheduler.wa_sent", event_id=event_id, group=db_event.group_wa_id)
+            await wa_sender.send_text(group_wa_id, calling_list)
+            log.info("event_scheduler.wa_sent", event_id=event_id, group=group_wa_id)
         except Exception as exc:
             send_failed = True
             log.error("event_scheduler.wa_send_failed", error=str(exc))
@@ -185,7 +203,8 @@ async def _auto_send_if_not_cancelled(event_id: int, calling_list: str) -> None:
             )
     else:
         send_failed = True
-        # No group WA ID configured — just send to Telegram for manual copy
+        # No group WA ID — send to Telegram for manual copy.
+        # Always close the event below so the scheduler doesn't re-fire every 5 minutes.
         await send_admin_message(
             f"📋 <b>Calling list ready</b> (no WA group ID set — copy below):\n\n"
             f"<pre>{calling_list[:3000]}</pre>"
@@ -195,8 +214,10 @@ async def _auto_send_if_not_cancelled(event_id: int, calling_list: str) -> None:
         db_event = await s.get(CricketEvent, event_id)
         if db_event:
             db_event.calling_list_text = calling_list
-            if not send_failed:
-                db_event.status = EventStatus.closed
+            # Always close regardless of WA send success so the scheduler doesn't
+            # re-process this event every 5 minutes. The Telegram message above
+            # gives the user a manual copy if WA send failed.
+            db_event.status = EventStatus.closed
 
     if not send_failed:
         await send_admin_message(

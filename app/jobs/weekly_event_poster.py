@@ -27,6 +27,7 @@ WEEKLY_GROUP    = "CHCC Members"  # Castle Hill Cricket Community
 WEEKLY_START    = (6, 30)   # 6:30 AM
 WEEKLY_END      = (10, 30)  # 10:30 AM
 WEEKLY_CUTOFF_HOURS = _SETTINGS.weekly_event_cutoff_hours
+WEEKLY_HOST     = "Abhishek"  # Organiser name shown first in calling list
 
 
 def _next_tuesday_7pm_aet() -> datetime:
@@ -126,6 +127,7 @@ async def _create_and_announce(event_at: datetime) -> None:
             cutoff_hours=WEEKLY_CUTOFF_HOURS,
             cutoff_at=cutoff_at_utc,
             status=EventStatus.open,
+            host_name=WEEKLY_HOST or None,
         )
         s.add(event)
         await s.flush()

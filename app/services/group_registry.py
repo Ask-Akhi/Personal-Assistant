@@ -42,6 +42,11 @@ def _infer_task(group_name: str) -> str | None:
 
 def _extract_group_id(raw: dict) -> str | None:
     """Extract WA group ID from raw message payload if it's a group message."""
+    for key in ("group_id", "remote_jid", "remoteJid"):
+        value = str(raw.get(key) or "").strip()
+        if value.endswith("@g.us"):
+            return value
+
     # Group messages: "from" is the sender's number,
     # but the group ID appears in metadata or context
     # In Cloud API, group messages have a "context" or the "to" field is the group ID
@@ -89,9 +94,12 @@ async def auto_register_group(
     value = group_name or group_id
 
     if existing:
-        # Update name if we got a better one
-        if group_name and group_name not in existing.value:
-            existing.value = f"{group_name} | task:{task or 'unknown'}"
+        stored_task = existing.value.rsplit(" | task:", 1)[1].strip() if " | task:" in existing.value else None
+        name_changed = group_name and group_name not in existing.value
+        task_improved = task and stored_task != task
+        if name_changed or task_improved:
+            base_name = group_name or existing.value.split(" | task:")[0].strip()
+            existing.value = f"{base_name} | task:{task or stored_task or 'unknown'}"
             await session.flush()
         return group_id
 
@@ -123,7 +131,7 @@ async def get_group_for_task(session: AsyncSession, task: str) -> str | None:
         select(Memory).where(
             Memory.kind == MemoryKind.assistant_rule,
             Memory.subject == "wa_group",
-        )
+        ).order_by(Memory.updated_at.desc(), Memory.created_at.desc())
     )).scalars().all()
 
     for row in rows:
@@ -131,6 +139,22 @@ async def get_group_for_task(session: AsyncSession, task: str) -> str | None:
             return row.key  # key is the group_id
 
     return None
+
+
+async def get_task_for_group(session: AsyncSession, group_id: str) -> str | None:
+    """Return the task key registered for a WA group, if known."""
+    if not group_id:
+        return None
+    row = (await session.execute(
+        select(Memory).where(
+            Memory.kind == MemoryKind.assistant_rule,
+            Memory.subject == "wa_group",
+            Memory.key == group_id,
+        )
+    )).scalar_one_or_none()
+    if not row or " | task:" not in row.value:
+        return None
+    return row.value.rsplit(" | task:", 1)[1].strip() or None
 
 
 async def list_groups(session: AsyncSession) -> list[dict]:

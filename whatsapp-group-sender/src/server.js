@@ -51,6 +51,7 @@ let forwardStats = {
   lastForwardedAt: null,
   lastForwardedCount: 0,
 };
+let recentGroupMessages = [];
 
 function requireAuth(req, res, next) {
   if (!API_TOKEN) {
@@ -142,6 +143,27 @@ function extractMessageText(message) {
   );
 }
 
+function rememberGroupMessage(message, groupId) {
+  const content = message?.message || {};
+  const eventMsg = content.eventMessage || content.eventCreationMessage || null;
+  recentGroupMessages.push({
+    at: new Date().toISOString(),
+    group_id: groupId,
+    message_id: message?.key?.id || null,
+    from_me: Boolean(message?.key?.fromMe),
+    participant: message?.key?.participant || message?.key?.participantPn || message?.key?.participantLid || null,
+    top_level_keys: Object.keys(message || {}),
+    message_keys: Object.keys(content),
+    event_responses: Array.isArray(message?.eventResponses) ? message.eventResponses.length : 0,
+    has_event_response_message: Boolean(content.eventResponseMessage),
+    has_event_message: Boolean(eventMsg),
+    embedded_rsvp_count: Array.isArray(eventMsg?.eventResponseMessages) ? eventMsg.eventResponseMessages.length : 0,
+    stub_type: message?.messageStubType || null,
+    stub_parameters: message?.messageStubParameters || null,
+  });
+  recentGroupMessages = recentGroupMessages.slice(-20);
+}
+
 function normalizeEventResponse(response) {
   const raw = typeof response === "string" ? response.trim().toLowerCase() : response;
   const map = {
@@ -173,7 +195,18 @@ function isBareRsvpText(text) {
 
 function responseParticipant(response, fallbackGroupId) {
   const key = response?.eventResponseMessageKey || response?.key || {};
-  return String(key.participant || key.participantPn || key.participantLid || "").trim();
+  const participant = (
+    key.participant ||
+    key.participantPn ||
+    key.participantLid ||
+    response?.participant ||
+    response?.participantPn ||
+    response?.participantLid ||
+    response?.senderPn ||
+    response?.senderLid ||
+    ""
+  );
+  return String(participant).trim();
 }
 
 function responseTimestamp(response, fallbackSeconds) {
@@ -185,9 +218,14 @@ function responseTimestamp(response, fallbackSeconds) {
   return Date.now();
 }
 
-function eventResponseExternalId(response, eventMessageId, participant) {
+function eventResponseExternalId(response, eventMessageId, participant, responseText, responseTimestampMs) {
   const key = response?.eventResponseMessageKey || response?.key || {};
-  return String(key.id || `${eventMessageId || "event"}:${participant || "unknown"}`);
+  const responseKeyId = String(key.id || "").trim();
+  const eventId = String(eventMessageId || responseKeyId || "event").trim();
+  const actor = String(participant || "unknown").trim();
+  const status = String(responseText || "unknown").trim();
+  const timestamp = String(responseTimestampMs || "").trim();
+  return `event-response:${eventId}:${actor}:${status}:${timestamp}`;
 }
 
 async function forwardInboundMessages(messages) {
@@ -210,6 +248,7 @@ async function forwardInboundMessages(messages) {
       forwardStats.skippedNonGroup += 1;
       continue;
     }
+    rememberGroupMessage(message, groupId);
 
     const content = message.message || {};
     const eventResponse = content.eventResponseMessage || null;
@@ -226,19 +265,20 @@ async function forwardInboundMessages(messages) {
         const participant = responseParticipant(response, groupId);
         const aliases = participantAliases(responseKey);
         const responseText = normalizeEventResponse(responseMessage.response);
+        const timestampMs = responseTimestamp(response, Number(message.messageTimestamp || Math.floor(Date.now() / 1000)));
         if ((!isRealParticipantId(participant) && !aliases.length) || !responseText || responseText === "unknown") {
           forwardStats.skippedNonPerson += 1;
           continue;
         }
 
         normalized.push({
-          external_id: eventResponseExternalId(response, message.key.id, participant),
+          external_id: eventResponseExternalId(response, message.key.id, participant || aliases[0], responseText, timestampMs),
           from_external_id: participant || aliases[0],
           participant_aliases: aliases,
           display_name: null,
           message_type: "event_response",
           text: responseText,
-          received_at: new Date(responseTimestamp(response, Number(message.messageTimestamp || Math.floor(Date.now() / 1000)))).toISOString(),
+          received_at: new Date(timestampMs).toISOString(),
           group_id: groupId,
           group_name: message.chatName || null,
           event_response: {
@@ -261,8 +301,55 @@ async function forwardInboundMessages(messages) {
       }
     }
 
+    // Handle RSVPs embedded in the event creation message itself.
+    // These appear when Baileys replays history (messaging-history.set) or
+    // when messages.update fires for the event card after votes come in.
+    const embeddedEventMsg = content.eventMessage || content.eventCreationMessage || null;
+    if (embeddedEventMsg) {
+      const embeddedResponses = Array.isArray(embeddedEventMsg.eventResponseMessages)
+        ? embeddedEventMsg.eventResponseMessages
+        : [];
+      const msgTs = Number(message.messageTimestamp || Math.floor(Date.now() / 1000));
+      const msgTsMs = msgTs > 100000000000 ? msgTs : msgTs * 1000;
+      for (const resp of embeddedResponses) {
+        const participant = String(resp.participant || resp.participantPn || resp.participantLid || "").trim();
+        if (!isRealParticipantId(participant)) continue;
+        const responseText = normalizeEventResponse(resp.response);
+        if (!responseText || responseText === "unknown") continue;
+        normalized.push({
+          external_id: `event-emb:${message.key.id}:${participant}:${responseText}`,
+          from_external_id: participant,
+          participant_aliases: participantAliases({ participant }),
+          display_name: null,
+          message_type: "event_response",
+          text: responseText,
+          received_at: new Date(msgTsMs).toISOString(),
+          group_id: groupId,
+          group_name: message.chatName || null,
+          event_response: {
+            response: resp.response,
+            normalized_response: responseText,
+            extra_guest_count: resp.extraGuestCount ?? null,
+            event_message_id: message.key.id || null,
+          },
+          raw: {
+            key: message.key,
+            event_message_id: message.key.id || null,
+            group_id: groupId,
+            participant,
+            remote_jid: groupId,
+            event_response: { response: resp.response, normalized_response: responseText },
+          },
+        });
+      }
+    }
+
+    // Only count as no_content if nothing was added from eventResponses/embeddedEventMsg either
     if (!eventResponse && !text) {
-      forwardStats.skippedNoContent += 1;
+      const hadEmbedded = normalized.length > 0;
+      if (!hadEmbedded) {
+        forwardStats.skippedNoContent += 1;
+      }
       continue;
     }
 
@@ -411,7 +498,14 @@ async function connectWhatsApp() {
     });
 
     sock.ev.on("messages.update", (updates) => {
-      const messages = (updates || []).map((item) => ({
+      // Skip updates that carry only delivery/read status — no RSVP or content data.
+      // Passing these into forwardInboundMessages produces misleading seenMessages/noContent noise.
+      const meaningful = (updates || []).filter((item) => {
+        const up = item.update || {};
+        return up.message || up.eventResponses || up.messageStubType || up.pollUpdates;
+      });
+      if (!meaningful.length) return;
+      const messages = meaningful.map((item) => ({
         key: item.key,
         ...(item.update || {}),
       }));
@@ -439,6 +533,7 @@ app.get("/healthz", (_req, res) => {
     auth_backend: authBackend,
     sync_full_history: SYNC_FULL_HISTORY,
     forward_stats: forwardStats,
+    recent_group_messages: recentGroupMessages,
   });
 });
 

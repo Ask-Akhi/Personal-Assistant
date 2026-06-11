@@ -247,6 +247,7 @@ class CricketEvent(Base):
     )
     announcement_wa_msg_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     calling_list_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    host_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

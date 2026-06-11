@@ -177,6 +177,10 @@ async def lifespan(_: FastAPI):
     # Auto-create tables on first run
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        from sqlalchemy import text as _text
+        await conn.execute(_text(
+            "ALTER TABLE cricket_event ADD COLUMN IF NOT EXISTS host_name VARCHAR(128);"
+        ))
     log.info("api.startup", env=settings.app_env)
 
     # Start all background workers as asyncio tasks

@@ -19,6 +19,7 @@ Commands (Phase 1 + 2 + 3):
   /votes                  - show live RSVPs for the active event
   /rsvpdebug              - show RSVP ingestion/filter diagnostics
   /callinglist            - preview + manually send calling list
+  /clearrsvps             - delete all stored RSVPs for the active event (PIN required)
   /wagroups               - list live WhatsApp groups from the sidecar
   /closeevent             - cancel the active event without sending
 
@@ -37,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 from functools import wraps
 
 from datetime import datetime
@@ -409,9 +411,9 @@ async def handle_event_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text("Already sent.")
                 return
             # Build fresh calling list and send immediately
+            await event_manager.backfill_event_rsvps_from_inbounds(s, db_event)
             calling_list = await event_manager.build_calling_list(s, db_event)
             db_event.calling_list_text = calling_list
-            db_event.status = EventStatus.closed
             await audit.record(s, actor=f"user:{uid}", action="calling_list_manual_send",
                                target=str(event_id))
 
@@ -433,10 +435,29 @@ async def handle_event_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if action == "send":
         # Send to WA group
         from app.services import wa_sender
-        if db_event.group_wa_id:
+        group_id = db_event.group_wa_id
+        if not group_id:
+            from app.services.group_registry import get_group_for_task
+            async with session_scope() as s:
+                group_id = await get_group_for_task(s, "weekly_cricket")
+                if group_id:
+                    ev = await s.get(CricketEvent, event_id)
+                    if ev:
+                        ev.group_wa_id = group_id
+
+        if group_id:
             try:
-                await wa_sender.send_text(db_event.group_wa_id, calling_list)
-                await query.message.reply_text(f"✅ Calling list sent to WhatsApp group!")
+                await wa_sender.send_text(group_id, calling_list)
+                async with session_scope() as s:
+                    ev = await s.get(CricketEvent, event_id)
+                    if ev:
+                        ev.calling_list_text = calling_list
+                        ev.group_wa_id = group_id
+                        ev.status = EventStatus.closed
+                await query.message.reply_text(
+                    f"✅ Calling list sent to WhatsApp group `{group_id}`!",
+                    parse_mode="Markdown",
+                )
             except Exception as exc:
                 await query.message.reply_text(
                     f"⚠️ WA send failed: `{str(exc)[:200]}`\n\nCopy manually:\n```\n{calling_list[:3000]}\n```",
@@ -712,6 +733,7 @@ async def cmd_votes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not ev:
             await update.message.reply_text("No active event. Create one with /newevent")
             return
+        await event_manager.backfill_event_rsvps_from_inbounds(s, ev)
         rows = await event_manager.get_group_filtered_rsvps(s, ev)
 
     if not rows:
@@ -758,9 +780,11 @@ async def cmd_rsvpdebug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("No active or recent event found.")
             return
 
+        await event_manager.backfill_event_rsvps_from_inbounds(s, ev)
         raw_rows = (await s.execute(
-            select(EventRsvp, Contact)
+            select(EventRsvp, Contact, InboundMessage)
             .join(Contact, Contact.id == EventRsvp.contact_id)
+            .outerjoin(InboundMessage, InboundMessage.id == EventRsvp.inbound_id)
             .where(EventRsvp.event_id == ev.id)
             .order_by(EventRsvp.created_at)
         )).all()
@@ -782,14 +806,25 @@ async def cmd_rsvpdebug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     forward = health.get("forward_stats") if isinstance(health.get("forward_stats"), dict) else {}
     sample = []
-    for rsvp, contact in raw_rows[:8]:
-        sample.append(f"- {contact.display_name or contact.external_id}: {rsvp.status.value} [{contact.external_id}]")
+    for rsvp, contact, inbound in raw_rows[:8]:
+        raw = inbound.raw if inbound and isinstance(inbound.raw, dict) else {}
+        aliases = raw.get("participant_aliases") if isinstance(raw.get("participant_aliases"), list) else []
+        inbound_group = raw.get("group_id") or raw.get("remote_jid") or raw.get("remoteJid") or "n/a"
+        alias_text = f" aliases={aliases[:3]}" if aliases else ""
+        reason = event_manager.rsvp_filter_reason(ev, contact, inbound)
+        sample.append(
+            f"- {contact.display_name or contact.external_id}: {rsvp.status.value} "
+            f"[{contact.external_id}] group={inbound_group}{alias_text} -> {reason}"
+        )
 
+    sidecar_seen = int(forward.get("seenMessages") or 0)
+    sidecar_attempts = int(forward.get("attempts") or 0)
     lines = [
         f"RSVP debug for event #{ev.id}",
         f"title: {ev.title}",
         f"group: {ev.group_wa_id or 'not set'}",
         f"sidecar connected: {health.get('connected')}",
+        f"sidecar assistant callback configured: {health.get('assistant_api_configured')}",
         f"sidecar history sync: {health.get('sync_full_history')}",
         f"sidecar seen: messages={forward.get('seenMessages')} last_seen={forward.get('lastSeenAt')}",
         f"sidecar skipped: no_key={forward.get('skippedNoKey')} from_me={forward.get('skippedFromMe')} non_group={forward.get('skippedNonGroup')} no_content={forward.get('skippedNoContent')} non_person={forward.get('skippedNonPerson')}",
@@ -797,6 +832,21 @@ async def cmd_rsvpdebug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"participant aliases fetched: {participant_count}",
         f"db rows: raw={len(raw_rows)} real={len(real_rows)} group_filtered={len(filtered_rows)}",
     ]
+    recent = health.get("recent_group_messages") if isinstance(health.get("recent_group_messages"), list) else []
+    if recent:
+        lines.append("recent sidecar messages:")
+        for item in recent[-3:]:
+            msg_keys = ",".join(item.get("message_keys") or [])
+            lines.append(
+                f"- group={item.get('group_id')} from_me={item.get('from_me')} "
+                f"event_responses={item.get('event_responses')} msg_keys={msg_keys or 'none'}"
+            )
+    if health.get("connected") is True and sidecar_seen == 0 and sidecar_attempts == 0:
+        lines.append("warning: sidecar is connected but has not seen/forwarded group messages since startup")
+    if health.get("assistant_api_configured") is False:
+        lines.append("warning: sidecar ASSISTANT_API_URL is not configured, so WhatsApp votes cannot sync into PI")
+    if raw_rows and not filtered_rows:
+        lines.append("warning: RSVP rows exist but calling-list filter excluded all of them; see row reasons below")
     if participant_error:
         lines.append(f"participant error: {participant_error}")
     if health.get("error"):
@@ -816,6 +866,7 @@ async def cmd_callinglist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not ev:
             await update.message.reply_text("No active event.")
             return
+        await event_manager.backfill_event_rsvps_from_inbounds(s, ev)
         calling_list = await event_manager.build_calling_list(s, ev)
 
     if ev.status != EventStatus.open:
@@ -910,6 +961,12 @@ async def cmd_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not group_id and ev.group_wa_id:
         group_id = ev.group_wa_id
 
+    if group_id:
+        async with session_scope() as s:
+            db_event = await s.get(CricketEvent, ev.id)
+            if db_event:
+                db_event.group_wa_id = group_id
+
     import pytz as _pytz
     AET_tz = _pytz.timezone("Australia/Sydney")
     ev_aet = ev.event_at.replace(tzinfo=_pytz.utc).astimezone(AET_tz)
@@ -935,7 +992,12 @@ async def cmd_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if group_id:
         try:
-            await wa_sender.send_text(group_id, announcement)
+            wa_msg_id = await wa_sender.send_text(group_id, announcement)
+            async with session_scope() as s:
+                db_event = await s.get(CricketEvent, ev.id)
+                if db_event:
+                    db_event.group_wa_id = group_id
+                    db_event.announcement_wa_msg_id = wa_msg_id
             await update.message.reply_text(f"✅ Announcement re-sent to group `{group_id}`!", parse_mode="Markdown")
         except Exception as exc:
             await update.message.reply_text(
@@ -950,10 +1012,83 @@ async def cmd_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
 
+class _NoActiveEventError(Exception):
+    """Raised when a manual RSVP is attempted with no open event."""
+
+
+def _manual_contact_jid(name: str) -> str:
+    """Build a filter-valid synthetic JID for a manually entered name.
+
+    Must satisfy event_manager._is_real_rsvp_contact(): contains '@' and does
+    NOT end in @g.us / @broadcast. We use a stable, unique-per-name address so
+    re-entering the same name updates the existing RSVP instead of duplicating.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "", name.lower()) or "guest"
+    return f"{slug}@manual.local"
+
+
+async def _record_manual_rsvp(name: str, status, vote_raw: str):
+    """Create/refresh a synthetic contact + inbound and upsert the RSVP.
+
+    The inbound carries the active event's group_wa_id in raw so the
+    group-filtered calling list keeps it. Raises _NoActiveEventError if there
+    is no open event.
+    """
+    from app.models import InboundMessage, RsvpStatus
+    from app.services.time_utils import utc_now_naive
+
+    jid = _manual_contact_jid(name)
+    async with session_scope() as s:
+        ev = await event_manager.get_active_event(s)
+        if not ev:
+            raise _NoActiveEventError()
+
+        contact = (await s.execute(
+            select(Contact).where(Contact.external_id == jid)
+        )).scalar_one_or_none()
+        if not contact:
+            contact = Contact(external_id=jid, display_name=name)
+            s.add(contact)
+            await s.flush()
+        elif contact.display_name != name:
+            contact.display_name = name
+
+        inbound = InboundMessage(
+            channel="manual",
+            external_id=f"manual_{ev.id}_{jid}",
+            contact_id=contact.id,
+            from_external_id=jid,
+            message_type="text",
+            text=vote_raw,
+            raw={"group_id": ev.group_wa_id, "source": "manual"},
+            received_at=utc_now_naive(),
+        )
+        # Upsert inbound by (channel, external_id) so repeats don't error.
+        existing_inbound = (await s.execute(
+            select(InboundMessage).where(
+                InboundMessage.channel == "manual",
+                InboundMessage.external_id == inbound.external_id,
+            )
+        )).scalar_one_or_none()
+        if existing_inbound:
+            existing_inbound.text = vote_raw
+            existing_inbound.raw = {"group_id": ev.group_wa_id, "source": "manual"}
+            inbound = existing_inbound
+        else:
+            s.add(inbound)
+            await s.flush()
+
+        await event_manager.upsert_rsvp(
+            s, event=ev, contact=contact, inbound=inbound,
+            status=status, raw_text=vote_raw,
+            note="Will Not Bowl" if status == RsvpStatus.wnbo else None,
+        )
+
+
 @allowlist_only
 async def cmd_testrsvp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
-    Inject a test RSVP into the active event from Telegram.
+    Inject a manual RSVP into the active event from Telegram.
     Usage: /testrsvp <Name> <yes|no|wnbo|maybe>
     Example: /testrsvp "Akhi" yes
              /testrsvp "Raj" wnbo
@@ -989,51 +1124,15 @@ async def cmd_testrsvp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    async with session_scope() as s:
-        ev = await event_manager.get_active_event(s)
-        if not ev:
-            await update.message.reply_text("❌ No active event. Run `/announce` first.", parse_mode="Markdown")
-            return
-
-        # Get or create a test contact
-        contact = (await s.execute(
-            select(Contact).where(Contact.external_id == f"test_{name.lower()}")
-        )).scalar_one_or_none()
-        if not contact:
-            contact = Contact(
-                external_id=f"test_{name.lower()}",
-                display_name=name,
-                platform="test",
-            )
-            s.add(contact)
-            await s.flush()
-
-        # Create a fake InboundMessage
-        from app.models import InboundMessage
-        inbound = InboundMessage(
-            contact_id=contact.id,
-            platform="test",
-            external_msg_id=f"test_{ev.id}_{name}_{vote_raw}",
-            text=vote_raw,
-            raw_payload="{}",
-        )
-        s.add(inbound)
-        await s.flush()
-
-        rsvp = await event_manager.upsert_rsvp(
-            s,
-            event=ev,
-            contact=contact,
-            inbound=inbound,
-            status=status,
-            raw_text=vote_raw,
-            note="Will Not Bowl" if status == RsvpStatus.wnbo else None,
-        )
-        rsvp_id = rsvp.id
+    try:
+        await _record_manual_rsvp(name, status, vote_raw)
+    except _NoActiveEventError:
+        await update.message.reply_text("❌ No active event. Run `/announce` first.", parse_mode="Markdown")
+        return
 
     emoji = {"yes": "✅", "no": "❌", "wnbo": "🏏", "maybe": "🤔"}.get(vote_raw, "📝")
     await update.message.reply_text(
-        f"{emoji} Test RSVP recorded!\n"
+        f"{emoji} RSVP recorded!\n"
         f"*{name}* → `{vote_raw.upper()}`\n\n"
         f"Run `/votes` to see all RSVPs or `/callinglist` to preview.",
         parse_mode="Markdown"
@@ -1089,36 +1188,12 @@ async def cmd_bulkrsvp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         names = [n.strip() for n in names_raw.split(",") if n.strip()]
         for name in names:
             try:
-                from app.models import RsvpStatus, InboundMessage
+                from app.models import RsvpStatus
                 status_enum = RsvpStatus[status]
-                async with session_scope() as s:
-                    ev2 = await event_manager.get_active_event(s)
-                    contact = (await s.execute(
-                        select(Contact).where(Contact.external_id == f"test_{name.lower()}")
-                    )).scalar_one_or_none()
-                    if not contact:
-                        contact = Contact(
-                            external_id=f"test_{name.lower()}",
-                            display_name=name,
-                            platform="test",
-                        )
-                        s.add(contact)
-                        await s.flush()
-                    inbound = InboundMessage(
-                        contact_id=contact.id,
-                        platform="test",
-                        external_msg_id=f"test_{ev2.id}_{name.lower()}_{status}",
-                        text=status,
-                        raw_payload="{}",
-                    )
-                    s.add(inbound)
-                    await s.flush()
-                    await event_manager.upsert_rsvp(
-                        s, event=ev2, contact=contact, inbound=inbound,
-                        status=status_enum, raw_text=status,
-                        note="Will Not Bowl" if status_enum == RsvpStatus.wnbo else None,
-                    )
+                await _record_manual_rsvp(name, status_enum, status)
                 results.append(f"✅ {name} → {status.upper()}")
+            except _NoActiveEventError:
+                errors.append(f"❌ {name}: no active event")
             except Exception as exc:
                 errors.append(f"❌ {name}: {exc}")
 
@@ -1132,9 +1207,8 @@ async def cmd_bulkrsvp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 @allowlist_only
 async def cmd_cleartestrsvps(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Remove all test RSVPs and test contacts from the active event (for clean re-testing)."""
-    from sqlalchemy import delete
-    from app.models import InboundMessage, EventRsvp
+    """Remove all manually entered RSVPs from the active event (for clean re-testing)."""
+    from app.models import EventRsvp
 
     async with session_scope() as s:
         ev = await event_manager.get_active_event(s)
@@ -1142,13 +1216,13 @@ async def cmd_cleartestrsvps(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("No active event.")
             return
 
-        # Find test contacts
-        test_contacts = (await s.execute(
-            select(Contact).where(Contact.platform == "test")
+        # Manual contacts use the synthetic @manual.local domain.
+        manual_contacts = (await s.execute(
+            select(Contact).where(Contact.external_id.like("%@manual.local"))
         )).scalars().all()
 
         count = 0
-        for tc in test_contacts:
+        for tc in manual_contacts:
             rsvps = (await s.execute(
                 select(EventRsvp).where(EventRsvp.contact_id == tc.id, EventRsvp.event_id == ev.id)
             )).scalars().all()
@@ -1156,7 +1230,60 @@ async def cmd_cleartestrsvps(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await s.delete(r)
                 count += 1
 
-    await update.message.reply_text(f"🗑️ Cleared {count} test RSVP(s). Run `/testrsvp` to add new ones.")
+    await update.message.reply_text(
+        f"🗑️ Cleared {count} manual RSVP(s). Real WhatsApp votes are untouched."
+    )
+
+
+@allowlist_only
+@pin_required
+async def cmd_clearrsvps(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Remove all stored RSVPs from the active event."""
+    uid = update.effective_user.id if update.effective_user else 0
+    async with session_scope() as s:
+        ev = await event_manager.resolve_event_for_control_plane(s)
+        if not ev:
+            await update.message.reply_text("No active or recent event found.")
+            return
+
+        rows = (await s.execute(
+            select(EventRsvp).where(EventRsvp.event_id == ev.id)
+        )).scalars().all()
+        count = len(rows)
+        for row in rows:
+            await s.delete(row)
+        await audit.record(
+            s,
+            actor=f"user:{uid}",
+            action="event_rsvps_cleared",
+            target=str(ev.id),
+            payload={"count": count, "title": ev.title},
+        )
+
+    await update.message.reply_text(
+        f"Cleared {count} stored RSVP row(s) for {ev.title}."
+    )
+
+
+@allowlist_only
+async def cmd_sethost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Set the organiser name shown first in the calling list: /sethost <name>"""
+    name = " ".join(ctx.args).strip() if ctx.args else ""
+    if not name:
+        await update.message.reply_text("Usage: /sethost <name>\nExample: /sethost Abhishek")
+        return
+    async with session_scope() as s:
+        ev = await event_manager.resolve_event_for_control_plane(s)
+        if not ev:
+            await update.message.reply_text("No active or recent event found.")
+            return
+        ev.host_name = name
+        ev_title = ev.title
+    await update.message.reply_text(
+        f"✅ Organiser set to <b>{name}</b> for <b>{ev_title}</b>.\n"
+        f"They will appear first in the calling list.",
+        parse_mode="HTML",
+    )
 
 
 @allowlist_only
@@ -1231,10 +1358,12 @@ def build_app():
     app.add_handler(CommandHandler("rsvpdebug",      cmd_rsvpdebug))
     app.add_handler(CommandHandler("callinglist",    cmd_callinglist))
     app.add_handler(CommandHandler("wagroups",       cmd_wagroups))
+    app.add_handler(CommandHandler("sethost",         cmd_sethost))
     app.add_handler(CommandHandler("closeevent",      cmd_closeevent))
     app.add_handler(CommandHandler("groups",          cmd_groups))
     app.add_handler(CommandHandler("testrsvp",        cmd_testrsvp))
     app.add_handler(CommandHandler("cleartestrsvps",  cmd_cleartestrsvps))
+    app.add_handler(CommandHandler("clearrsvps",      cmd_clearrsvps))
     app.add_handler(CommandHandler("bulkrsvp",        cmd_bulkrsvp))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_reply))

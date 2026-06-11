@@ -295,14 +295,114 @@ async def get_group_filtered_rsvps(
         .where(EventRsvp.event_id == event.id)
         .order_by(EventRsvp.created_at)
     )
-    group_rows = [
-        (rsvp, contact, inbound)
-        for rsvp, contact, inbound in row_result.all()
-        if _is_real_rsvp_contact(contact)
-        and _rsvp_inbound_group_id(inbound) == event.group_wa_id
-    ]
+
+    # RSVPs are scoped to event_id and group-validated at write time. Do not
+    # hard-filter by participant lookup here: WhatsApp can represent the same
+    # person as @lid, @s.whatsapp.net, or a bare number at different moments.
+    # A successful participant lookup is useful for diagnostics, but too brittle
+    # as a counting gate and can produce a false "0 RSVPs" calling list.
+    group_rows = []
+    for rsvp, contact, inbound in row_result.all():
+        if not _is_real_rsvp_contact(contact):
+            continue
+        inbound_group = _rsvp_inbound_group_id(inbound)
+        if inbound_group and inbound_group != event.group_wa_id:
+            # Explicitly belongs to a different group -> skip.
+            continue
+        group_rows.append((rsvp, contact, inbound))
 
     return [(rsvp, contact) for rsvp, contact, _inbound in group_rows]
+
+
+def rsvp_filter_reason(
+    event: CricketEvent,
+    contact: Contact,
+    inbound: InboundMessage | None,
+) -> str:
+    """Explain whether an RSVP row is included in the calling-list filter."""
+    if not _is_real_rsvp_contact(contact):
+        return "excluded: non-person contact"
+    inbound_group = _rsvp_inbound_group_id(inbound)
+    if inbound_group and event.group_wa_id and inbound_group != event.group_wa_id:
+        return f"excluded: wrong group {inbound_group}"
+    if inbound_group:
+        return f"included: matched group {inbound_group}"
+    return "included: no inbound group marker, trusted by event_id"
+
+
+async def backfill_event_rsvps_from_inbounds(
+    session: AsyncSession,
+    event: CricketEvent,
+) -> int:
+    """Recover RSVP rows from already-stored inbound group messages.
+
+    This is intentionally silent: it repairs rows that were previously missed
+    due to stale group mapping or brittle alias checks without sending a burst
+    of Telegram RSVP notifications.
+    """
+    candidate_groups = {event.group_wa_id} if event.group_wa_id else set()
+
+    from app.services.group_registry import get_group_for_task
+
+    weekly_group = await get_group_for_task(session, "weekly_cricket")
+    if weekly_group:
+        candidate_groups.add(weekly_group)
+        if not event.group_wa_id:
+            event.group_wa_id = weekly_group
+
+    candidate_groups = {group for group in candidate_groups if group}
+    if not candidate_groups:
+        return 0
+
+    query = (
+        select(InboundMessage, Contact)
+        .join(Contact, Contact.id == InboundMessage.contact_id)
+        .order_by(InboundMessage.received_at)
+    )
+    if event.created_at:
+        query = query.where(InboundMessage.received_at >= event.created_at)
+    rows = await session.execute(query)
+
+    repaired = 0
+    for inbound, contact in rows.all():
+        inbound_group = _rsvp_inbound_group_id(inbound)
+        if inbound_group not in candidate_groups:
+            continue
+        if event.group_wa_id and inbound_group != event.group_wa_id:
+            if not await _maybe_rebind_event_group(session, event, inbound_group_wa_id=inbound_group):
+                continue
+            event.group_wa_id = inbound_group
+        if not _is_real_rsvp_contact(contact):
+            continue
+        if not _inbound_matches_event_card(event, inbound):
+            continue
+
+        status, is_wnbo = _classify_inbound_rsvp(inbound)
+        if status is None:
+            continue
+
+        before = await session.execute(
+            select(EventRsvp).where(
+                EventRsvp.event_id == event.id,
+                EventRsvp.contact_id == contact.id,
+            )
+        )
+        existed = before.scalar_one_or_none() is not None
+        await upsert_rsvp(
+            session,
+            event=event,
+            contact=contact,
+            inbound=inbound,
+            status=status,
+            raw_text=inbound.text or "",
+            note="Will Not Bowl" if is_wnbo and status != RsvpStatus.wnbo else None,
+        )
+        if not existed:
+            repaired += 1
+
+    if repaired:
+        log.info("event_manager.rsvp_backfilled", event_id=event.id, count=repaired)
+    return repaired
 
 
 def _is_real_rsvp_contact(contact: Contact) -> bool:
@@ -321,8 +421,11 @@ def _is_real_rsvp_contact(contact: Contact) -> bool:
 def _rsvp_inbound_group_id(inbound: InboundMessage | None) -> str | None:
     if not inbound or not isinstance(inbound.raw, dict):
         return None
-    group_id = str(inbound.raw.get("group_id") or "").strip()
-    return group_id or None
+    for key in ("group_id", "remote_jid", "remoteJid"):
+        group_id = str(inbound.raw.get(key) or "").strip()
+        if group_id.endswith("@g.us"):
+            return group_id
+    return None
 
 
 def _add_rsvp_alias(result: set[str], value: object) -> None:
@@ -377,6 +480,16 @@ async def build_calling_list(
             not_coming.append(name)
         elif rsvp.status == RsvpStatus.maybe:
             maybe_list.append(name)
+
+    # Pin the event organiser at the top of the going list.
+    # Only skip if they explicitly said NO or MAYBE.
+    if event.host_name:
+        host = event.host_name
+        in_no = any(host.lower() in n.lower() for n in not_coming)
+        in_maybe = any(host.lower() in n.lower() for n in maybe_list)
+        if not in_no and not in_maybe:
+            going = [n for n in going if host.lower() not in n.lower()]
+            going.insert(0, f"{host} *(organiser)*")
 
     event_dt = (
         as_utc_aware(event.event_at).astimezone(AET).strftime("%a, %b %-d at %-I:%M %p AET")
@@ -440,6 +553,38 @@ async def handle_possible_rsvp(
         return False
     if event.group_wa_id:
         if group_wa_id != event.group_wa_id:
+            if await _maybe_rebind_event_group(session, event, inbound_group_wa_id=group_wa_id):
+                log.warning(
+                    "event_manager.rsvp_rebound_event_group",
+                    event_id=event.id,
+                    old_group_id=event.group_wa_id,
+                    new_group_id=group_wa_id,
+                    external_id=contact.external_id,
+                )
+                event.group_wa_id = group_wa_id
+            else:
+                log.info(
+                    "event_manager.rsvp_ignored_wrong_group",
+                    event_id=event.id,
+                    group_id=event.group_wa_id,
+                    inbound_group_id=group_wa_id,
+                    external_id=contact.external_id,
+                    message_type=inbound.message_type,
+                )
+                return False
+        # Do not reject on participant metadata mismatch. Group JID is the
+        # durable boundary; participant aliases are lossy across WA/Baileys.
+    elif group_wa_id:
+        event.group_wa_id = group_wa_id
+        log.info(
+            "event_manager.rsvp_bound_event_group",
+            event_id=event.id,
+            group_id=group_wa_id,
+            external_id=contact.external_id,
+        )
+
+    if event.group_wa_id:
+        if group_wa_id != event.group_wa_id:
             log.info(
                 "event_manager.rsvp_ignored_wrong_group",
                 event_id=event.id,
@@ -449,6 +594,17 @@ async def handle_possible_rsvp(
                 message_type=inbound.message_type,
             )
             return False
+
+    if not _inbound_matches_event_card(event, inbound):
+        log.info(
+            "event_manager.rsvp_ignored_wrong_event_card",
+            event_id=event.id,
+            announcement_wa_msg_id=event.announcement_wa_msg_id,
+            inbound_event_message_id=_rsvp_event_message_id(inbound),
+            external_id=contact.external_id,
+            message_type=inbound.message_type,
+        )
+        return False
 
     status, is_wnbo = _classify_inbound_rsvp(inbound)
     if status is None:
@@ -494,6 +650,22 @@ def _extract_group_wa_id(inbound: InboundMessage) -> str | None:
     return None
 
 
+async def _maybe_rebind_event_group(
+    session: AsyncSession,
+    event: CricketEvent,
+    *,
+    inbound_group_wa_id: str | None,
+) -> bool:
+    """Allow a weekly event to recover when it was saved with a stale group ID."""
+    if not inbound_group_wa_id or not inbound_group_wa_id.endswith("@g.us"):
+        return False
+
+    from app.services.group_registry import get_task_for_group
+
+    task = await get_task_for_group(session, inbound_group_wa_id)
+    return task == "weekly_cricket"
+
+
 def _classify_inbound_rsvp(inbound: InboundMessage) -> tuple[RsvpStatus | None, bool]:
     raw = inbound.raw or {}
     if inbound.message_type in {"event_response", "poll_vote"}:
@@ -516,6 +688,43 @@ def _classify_inbound_rsvp(inbound: InboundMessage) -> tuple[RsvpStatus | None, 
         return None, False
 
     return classify_rsvp(inbound.text)
+
+
+def _inbound_matches_event_card(event: CricketEvent, inbound: InboundMessage) -> bool:
+    if inbound.message_type not in {"event_response", "poll_vote"}:
+        return True
+    if not event.announcement_wa_msg_id:
+        return True
+    inbound_event_id = _rsvp_event_message_id(inbound)
+    if not inbound_event_id:
+        return True
+    if inbound_event_id != event.announcement_wa_msg_id:
+        inbound_group_id = _extract_group_wa_id(inbound)
+        if event.group_wa_id and inbound_group_id == event.group_wa_id:
+            # Baileys event-result snapshots reference the WhatsApp event card,
+            # while announcement_wa_msg_id is often our plain text post ID.
+            # For a bound group, the group/event row is the safer boundary.
+            return True
+    return inbound_event_id == event.announcement_wa_msg_id
+
+
+def _rsvp_event_message_id(inbound: InboundMessage) -> str | None:
+    raw = inbound.raw if isinstance(inbound.raw, dict) else {}
+    for key in ("event_message_id", "eventMessageId"):
+        value = str(raw.get(key) or "").strip()
+        if value:
+            return value
+
+    response = raw.get("event_response")
+    if isinstance(response, dict):
+        for key in ("event_message_id", "eventMessageId"):
+            value = str(response.get(key) or "").strip()
+            if value:
+                return value
+
+    event_key = raw.get("event_key") if isinstance(raw.get("event_key"), dict) else {}
+    value = str(event_key.get("id") or "").strip()
+    return value or None
 
 
 async def _notify_rsvp(
