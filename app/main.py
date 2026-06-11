@@ -181,6 +181,45 @@ async def lifespan(_: FastAPI):
         await conn.execute(_text(
             "ALTER TABLE cricket_event ADD COLUMN IF NOT EXISTS host_name VARCHAR(128);"
         ))
+    # Fix known-bad registry entry: community container JID was incorrectly
+    # tagged as weekly_cricket; CHCC Members sub-group JID is the correct one.
+    _COMMUNITY_JID = "120363408907704792@g.us"
+    _CHCC_MEMBERS_JID = "120363169583747786@g.us"
+    async with session_scope() as _s:
+        from sqlalchemy import select as _sel
+        from app.models import Memory as _Mem, MemoryKind as _MK
+        _bad = (await _s.execute(
+            _sel(_Mem).where(
+                _Mem.kind == _MK.assistant_rule,
+                _Mem.subject == "wa_group",
+                _Mem.key == _COMMUNITY_JID,
+            )
+        )).scalar_one_or_none()
+        if _bad and "task:weekly_cricket" in _bad.value:
+            _bad.value = _bad.value.replace("task:weekly_cricket", "task:unknown")
+            log.info("startup.registry_fix", jid=_COMMUNITY_JID, action="removed_weekly_cricket_tag")
+        _good = (await _s.execute(
+            _sel(_Mem).where(
+                _Mem.kind == _MK.assistant_rule,
+                _Mem.subject == "wa_group",
+                _Mem.key == _CHCC_MEMBERS_JID,
+            )
+        )).scalar_one_or_none()
+        if _good:
+            if "task:weekly_cricket" not in _good.value:
+                base = _good.value.split(" | task:")[0].strip()
+                _good.value = f"CHCC Members | task:weekly_cricket"
+                log.info("startup.registry_fix", jid=_CHCC_MEMBERS_JID, action="set_weekly_cricket_tag")
+        else:
+            from app.models import Memory as _Mem2
+            _s.add(_Mem2(
+                kind=_MK.assistant_rule,
+                subject="wa_group",
+                key=_CHCC_MEMBERS_JID,
+                value="CHCC Members | task:weekly_cricket",
+            ))
+            log.info("startup.registry_fix", jid=_CHCC_MEMBERS_JID, action="created_weekly_cricket_entry")
+
     log.info("api.startup", env=settings.app_env)
 
     # Start all background workers as asyncio tasks

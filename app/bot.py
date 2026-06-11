@@ -994,17 +994,18 @@ async def cmd_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Resolve group ID
+    # Resolve group ID — explicit arg > event's stored JID > registry > env var
     group_id = override_group
+    if not group_id and ev.group_wa_id:
+        group_id = ev.group_wa_id
     if not group_id:
         async with session_scope() as s:
             group_id = await get_group_for_task(s, "weekly_cricket")
     if not group_id:
         group_id = get_settings().whatsapp_group_id or None
-    if not group_id and ev.group_wa_id:
-        group_id = ev.group_wa_id
 
-    if group_id:
+    if group_id and not ev.group_wa_id:
+        # Only write back to DB if the event didn't already have a JID
         async with session_scope() as s:
             db_event = await s.get(CricketEvent, ev.id)
             if db_event:
