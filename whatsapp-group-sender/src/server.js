@@ -33,6 +33,7 @@ let connected = false;
 let lastQr = null;
 let me = null;
 let reconnecting = false;
+let reconnectAttempt = 0;
 let authBackend = DATABASE_URL ? "postgres" : "filesystem";
 let authPool = null;
 let forwardStats = {
@@ -460,6 +461,11 @@ async function connectWhatsApp() {
       syncFullHistory: SYNC_FULL_HISTORY,
       shouldSyncHistoryMessage: () => true,
       version,
+      // Render free tier wakes slowly — give WA handshake enough time
+      connectTimeoutMs: 60_000,
+      defaultQueryTimeoutMs: 60_000,
+      keepAliveIntervalMs: 25_000,
+      retryRequestDelayMs: 2_000,
     });
 
     sock.ev.on("creds.update", saveCreds);
@@ -481,12 +487,20 @@ async function connectWhatsApp() {
         log.info({ user: me }, "whatsapp connected");
       }
 
+      if (connection === "open") {
+        reconnectAttempt = 0;  // reset on successful connect
+      }
+
       if (connection === "close") {
         connected = false;
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        log.warn({ statusCode }, "whatsapp connection closed");
+        log.warn({ statusCode, attempt: reconnectAttempt }, "whatsapp connection closed");
         if (statusCode !== DisconnectReason.loggedOut) {
-          setTimeout(connectWhatsApp, 3000);
+          // Exponential backoff: 3s, 6s, 12s, 24s … capped at 60s
+          const delay = Math.min(3000 * Math.pow(2, reconnectAttempt), 60_000);
+          reconnectAttempt += 1;
+          log.info({ delay_ms: delay, attempt: reconnectAttempt }, "scheduling reconnect");
+          setTimeout(connectWhatsApp, delay);
         } else {
           log.error("whatsapp logged out; delete auth state and scan a new QR");
         }

@@ -111,6 +111,22 @@ async def _run_weekly_event_poster():
     await run()
 
 
+async def _run_sidecar_keepalive():
+    """Ping the WA sidecar every 4 minutes to prevent Render free-tier hibernation."""
+    import httpx as _httpx
+    base = (settings.whatsapp_group_sender_url or "").rstrip("/")
+    if not base:
+        return
+    while True:
+        await asyncio.sleep(240)  # 4 minutes
+        try:
+            async with _httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(f"{base}/healthz")
+            log.debug("sidecar_keepalive.ok", status=r.status_code)
+        except Exception as exc:
+            log.warning("sidecar_keepalive.failed", error=str(exc))
+
+
 async def _ingest_whatsapp_messages(
     *,
     source: str,
@@ -228,6 +244,7 @@ async def lifespan(_: FastAPI):
     _background_tasks.append(asyncio.create_task(_run_reminder_worker(), name="reminders"))
     _background_tasks.append(asyncio.create_task(_run_event_scheduler(), name="event_scheduler"))
     _background_tasks.append(asyncio.create_task(_run_weekly_event_poster(), name="weekly_poster"))
+    _background_tasks.append(asyncio.create_task(_run_sidecar_keepalive(), name="sidecar_keepalive"))
     log.info("workers.started", count=len(_background_tasks))
 
     yield
