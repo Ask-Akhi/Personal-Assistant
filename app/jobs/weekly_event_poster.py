@@ -141,47 +141,72 @@ async def _create_and_announce(event_at: datetime) -> None:
             payload={"title": WEEKLY_TITLE, "event_at": str(event_at)},
         )
 
-    # Build announcement message
+    # Build event details
     day_str   = event_at.strftime("%A, %d %b %Y")
     start_str = event_at.strftime("%-I:%M %p")
     end_str   = event_at.replace(
         hour=WEEKLY_END[0], minute=WEEKLY_END[1]
     ).strftime("%-I:%M %p")
+    cutoff_str = as_utc_aware(cutoff_at_utc).astimezone(AET).strftime("%a, %d %b %-I:%M %p AET")
 
+    event_description = (
+        f"📍 Coolong Reserve\n\n"
+        f"Reply in the chat:\n"
+        f"✅ YES — Coming\n"
+        f"🏏 WNBO — Coming but Will Not Bowl\n"
+        f"❌ NO — Can't make it\n\n"
+        f"📋 Calling list by {cutoff_str}"
+    )
+
+    # Fallback plain text (used if event card fails or no group configured)
     announcement = (
         f"Hi CHCC Members! 👋\n\n"
         f"🏏 *T20 Cricket - This Saturday!*\n\n"
         f"📅 {day_str}\n"
         f"⏰ {start_str} - {end_str}\n"
         f"📍 Coolong Reserve\n\n"
-        f"Please reply in this group message thread:\n"
-        f"✅ *YES* - Coming\n"
-        f"🏏 *WNBO* - Coming but Will Not Bowl\n"
-        f"❌ *NO* - Can't make it\n"
-        f"⚠️ Please type the reply; WhatsApp event-card taps are not visible to the automation.\n\n"
-        f"📋 Calling list will be shared by "
-        f"{as_utc_aware(cutoff_at_utc).astimezone(AET).strftime('%a, %d %b %-I:%M %p AET')}. "
-        f"See you on the field! 🏆"
+        f"Please reply: *YES* / *WNBO* / *NO*\n\n"
+        f"📋 Calling list by {cutoff_str}. See you on the field! 🏆"
     )
 
     # Send to WhatsApp group
     if group_id:
         try:
-            wa_msg_id = await wa_sender.send_text(group_id, announcement)
+            import calendar
+            start_epoch = int(calendar.timegm(event_at.timetuple()))
+            end_at = event_at.replace(hour=WEEKLY_END[0], minute=WEEKLY_END[1])
+            end_epoch = int(calendar.timegm(end_at.timetuple()))
+
+            wa_msg_id = await wa_sender.send_event(
+                group_id=group_id,
+                name=f"T20 Cricket — {event_at.strftime('%a %d %b')}",
+                description=event_description,
+                start_time=start_epoch,
+                end_time=end_epoch,
+                location_name="Coolong Reserve",
+            )
             async with session_scope() as s:
                 ev = await s.get(CricketEvent, event_id)
                 if ev:
                     ev.announcement_wa_msg_id = wa_msg_id
-            log.info("weekly_poster.wa_sent", event_id=event_id)
+            log.info("weekly_poster.wa_event_sent", event_id=event_id)
         except Exception as exc:
-            log.error("weekly_poster.wa_failed", error=str(exc))
-            await send_admin_message(
-                f"<b>Weekly event created</b> but WA send failed!\n"
-                f"Error: <code>{str(exc)[:300]}</code>\n\n"
-                f"Copy &amp; paste manually:\n<pre>{announcement}</pre>"
-            )
+            log.warning("weekly_poster.event_card_failed_trying_text", error=str(exc))
+            try:
+                wa_msg_id = await wa_sender.send_text(group_id, announcement)
+                async with session_scope() as s:
+                    ev = await s.get(CricketEvent, event_id)
+                    if ev:
+                        ev.announcement_wa_msg_id = wa_msg_id
+                log.info("weekly_poster.wa_text_sent", event_id=event_id)
+            except Exception as exc2:
+                log.error("weekly_poster.wa_failed", error=str(exc2))
+                await send_admin_message(
+                    f"<b>Weekly event created</b> but WA send failed!\n"
+                    f"Error: <code>{str(exc2)[:300]}</code>\n\n"
+                    f"Copy &amp; paste manually:\n<pre>{announcement}</pre>"
+                )
     else:
-        # No group ID yet - send to Telegram for manual copy
         await send_admin_message(
             f"<b>Weekly event created (no WA group ID set)</b>\n"
             f"Copy &amp; paste to your group:\n\n<pre>{announcement}</pre>"

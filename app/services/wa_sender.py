@@ -157,6 +157,54 @@ async def _send_group_text(to: str, text: str, settings) -> str:
     return message_id
 
 
+async def send_event(
+    group_id: str,
+    name: str,
+    description: str,
+    start_time: int,
+    end_time: int,
+    location_name: str | None = None,
+) -> str:
+    """Send a native WhatsApp event card to a group. Returns the WA message id."""
+    settings = get_settings()
+    if not settings.whatsapp_group_sender_url:
+        raise WhatsAppSendError("WHATSAPP_GROUP_SENDER_URL not configured")
+
+    await _wake_group_sender(settings)
+
+    headers = {"Content-Type": "application/json"}
+    if settings.whatsapp_group_sender_token:
+        headers["Authorization"] = f"Bearer {settings.whatsapp_group_sender_token}"
+
+    payload: dict = {
+        "group_id": group_id,
+        "name": name,
+        "description": description,
+        "start_time": start_time,
+        "end_time": end_time,
+    }
+    if location_name:
+        payload["location_name"] = location_name
+
+    async with httpx.AsyncClient(timeout=45) as client:
+        response = await client.post(
+            f"{settings.whatsapp_group_sender_url.rstrip('/')}/send-event",
+            json=payload,
+            headers=headers,
+        )
+
+    if response.is_error:
+        detail = _extract_error_detail(response)
+        raise WhatsAppSendError(
+            f"WA event send failed: HTTP {response.status_code} - {detail[:500]}"
+        )
+
+    data = response.json()
+    message_id = str(data.get("message_id") or "event-sent-ok")
+    log.info("wa_sender.event_sent", to=group_id, wa_message_id=message_id)
+    return message_id
+
+
 async def _wake_group_sender(settings) -> None:
     base_url = settings.whatsapp_group_sender_url.rstrip("/")
     if base_url.endswith("/send"):

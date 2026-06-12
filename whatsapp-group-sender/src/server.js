@@ -718,6 +718,43 @@ async function sendGroupMessage(req, res) {
 app.post("/", requireAuth, sendGroupMessage);
 app.post("/send", requireAuth, sendGroupMessage);
 
+// Send a native WhatsApp event card to a group.
+// start_time / end_time are Unix epoch seconds.
+app.post("/send-event", requireAuth, async (req, res) => {
+  if (!connected || !sock) {
+    return res.status(503).json({ ok: false, error: "whatsapp_not_connected" });
+  }
+
+  const { group_id, name, description, start_time, end_time, location_name } = req.body;
+  if (!group_id || !name || !start_time) {
+    return res.status(400).json({ ok: false, error: "group_id, name, start_time required" });
+  }
+
+  const groupId = normalizeGroupId(group_id);
+
+  try {
+    const eventMessage = proto.Message.EventMessage.fromObject({
+      name: String(name),
+      description: String(description || ""),
+      startTime: Number(start_time),
+      endTime: Number(end_time || (Number(start_time) + 4 * 3600)),
+      location: location_name
+        ? proto.Message.LocationMessage.fromObject({ name: String(location_name) })
+        : null,
+      isCanceled: false,
+    });
+
+    const fullMsg = proto.Message.fromObject({ eventMessage });
+    const result = await sock.relayMessage(groupId, fullMsg, {});
+    const messageId = result?.key?.id || "";
+    log.info({ groupId, messageId }, "wa event sent");
+    return res.json({ ok: true, message_id: messageId });
+  } catch (error) {
+    log.error({ error: error.message }, "send-event failed");
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   log.info({ port: PORT, authDir: AUTH_DIR, authBackend }, "whatsapp group sender listening");
   if (!ASSISTANT_API_URL) {

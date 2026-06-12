@@ -1075,40 +1075,63 @@ async def cmd_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cutoff_aet = ev.cutoff_at.replace(tzinfo=_pytz.utc).astimezone(AET_tz) if ev.cutoff_at else None
     cutoff_str = cutoff_aet.strftime("%a %d %b, %-I:%M %p AET") if cutoff_aet else "N/A"
 
-    announcement = (
+    event_description = (
+        f"\U0001f4cd Coolong Reserve\n\n"
+        f"Reply in the chat:\n"
+        f"✅ YES — Coming\n"
+        f"\U0001f3cf WNBO — Coming but Will Not Bowl\n"
+        f"❌ NO — Can't make it\n\n"
+        f"\U0001f4cb Calling list by {cutoff_str}"
+    )
+    announcement_text = (
         f"Hi CHCC Members! \U0001f44b\n\n"
         f"\U0001f3cf *T20 Cricket - This Saturday!*\n\n"
         f"\U0001f4c5 {day_str}\n"
-        f"\u23f0 {start_str} - {end_str}\n"
+        f"⏰ {start_str} - {end_str}\n"
         f"\U0001f4cd Coolong Reserve\n\n"
-        f"Please reply in this group message thread:\n"
-        f"\u2705 *YES* - Coming\n"
-        f"\U0001f3cf *WNBO* - Coming but Will Not Bowl\n"
-        f"\u274c *NO* - Can't make it\n"
-        f"\u26a0\ufe0f Please type the reply; WhatsApp event-card taps are not visible to the automation.\n\n"
-        f"\U0001f4cb Calling list will be shared by {cutoff_str}. See you on the field! \U0001f3c6"
+        f"Reply: *YES* / *WNBO* / *NO*\n\n"
+        f"\U0001f4cb Calling list by {cutoff_str}. See you on the field! \U0001f3c6"
     )
 
     if group_id:
         try:
-            wa_msg_id = await wa_sender.send_text(group_id, announcement)
-            async with session_scope() as s:
-                db_event = await s.get(CricketEvent, ev.id)
-                if db_event:
-                    db_event.group_wa_id = group_id
-                    db_event.announcement_wa_msg_id = wa_msg_id
-            await update.message.reply_text(f"✅ Announcement re-sent to group `{group_id}`!", parse_mode="Markdown")
-        except Exception as exc:
-            await update.message.reply_text(
-                f"⚠️ WA send failed: `{str(exc)[:200]}`\n\nCopy manually:\n```\n{announcement}\n```",
-                parse_mode="Markdown"
+            import calendar as _cal
+            start_epoch = int(_cal.timegm(ev_aet.timetuple()))
+            end_epoch = int(_cal.timegm(ev_aet.replace(hour=10, minute=30).timetuple()))
+            wa_msg_id = await wa_sender.send_event(
+                group_id=group_id,
+                name="T20 Cricket — " + ev_aet.strftime("%a %d %b"),
+                description=event_description,
+                start_time=start_epoch,
+                end_time=end_epoch,
+                location_name="Coolong Reserve",
             )
+        except Exception as exc:
+            log.warning("cmd_announce.event_card_failed_trying_text", error=str(exc))
+            try:
+                wa_msg_id = await wa_sender.send_text(group_id, announcement_text)
+            except Exception as exc2:
+                await update.message.reply_text(
+                    f"⚠️ WA send failed: `{str(exc2)[:200]}`\n\nCopy manually:\n```\n{announcement_text}\n```",
+                    parse_mode="Markdown",
+                )
+                return
+
+        async with session_scope() as s:
+            db_event = await s.get(CricketEvent, ev.id)
+            if db_event:
+                db_event.group_wa_id = group_id
+                db_event.announcement_wa_msg_id = wa_msg_id
+        await update.message.reply_text(
+            f"✅ Event card sent to group `{group_id}`!", parse_mode="Markdown"
+        )
     else:
         await update.message.reply_text(
-            f"⚠️ No WA group ID found. Copy and paste manually:\n\n```\n{announcement}\n```\n\n"
-            f"Use `/wagroups` to pick a WhatsApp group from the sidecar, or use: `/announce <group_wa_id>`.",
-            parse_mode="Markdown"
+            f"⚠️ No WA group ID found. Copy and paste manually:\n\n```\n{announcement_text}\n```\n\n"
+            "Use `/wagroups` to pick a WhatsApp group from the sidecar, or use: `/announce <group_wa_id>`.",
+            parse_mode="Markdown",
         )
+
 
 
 class _NoActiveEventError(Exception):
