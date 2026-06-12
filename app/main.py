@@ -200,7 +200,7 @@ async def lifespan(_: FastAPI):
     # Fix known-bad registry entry: community container JID was incorrectly
     # tagged as weekly_cricket; CHCC Members sub-group JID is the correct one.
     _COMMUNITY_JID = "120363408907704792@g.us"
-    _CHCC_MEMBERS_JID = "120363169583747786@g.us"
+    _CHCC_MEMBERS_JID = "120363407346476064@g.us"
     async with session_scope() as _s:
         from sqlalchemy import select as _sel
         from app.models import Memory as _Mem, MemoryKind as _MK
