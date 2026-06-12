@@ -621,6 +621,61 @@ async def cmd_groupdebug(update: Update, _ctx):
     )
 
 
+@allowlist_only
+async def cmd_recentgroups(update: Update, _ctx):
+    """Show group JIDs seen in recent inbound messages — send a message from CHCC Members first."""
+    try:
+        health = await _fetch_sidecar_health()
+    except Exception as exc:
+        await update.message.reply_text(f"⚠️ {exc}", parse_mode="HTML")
+        return
+
+    recent = health.get("recent_group_messages") or []
+    if not recent:
+        await update.message.reply_text(
+            "No recent group messages seen by sidecar.\n"
+            "Send any message from your phone in CHCC Members, then run /recentgroups again."
+        )
+        return
+
+    # Deduplicate by group_id, keep most recent
+    seen: dict[str, dict] = {}
+    for m in recent:
+        gid = m.get("group_id") or ""
+        if gid and gid not in seen:
+            seen[gid] = m
+
+    lines = []
+    for gid, m in seen.items():
+        keys = ", ".join((m.get("message_keys") or [])[:4])
+        lines.append(f"<code>{gid}</code>\n  at: {m.get('at','?')[:19]}  keys: {keys}")
+
+    await update.message.reply_text(
+        "<b>Recent inbound group JIDs:</b>\n\n" + "\n\n".join(lines) +
+        "\n\n<i>Send a message in CHCC Members from your phone, then re-run to see its JID appear.</i>",
+        parse_mode="HTML",
+    )
+
+
+@allowlist_only
+async def cmd_testsend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/testsend <jid> — send a test message to any WA JID to confirm it reaches the right group."""
+    from app.services import wa_sender
+    jid = (ctx.args[0] if ctx.args else "").strip()
+    if not jid or not jid.endswith("@g.us"):
+        await update.message.reply_text(
+            "Usage: <code>/testsend 1234567890@g.us</code>\n"
+            "Sends a test message to that JID so you can see which WA group it arrives in.",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        await wa_sender.send_text(jid, "🔍 PI bot test message — if you see this, this JID is correct.")
+        await update.message.reply_text(f"✅ Test message sent to <code>{jid}</code>\nCheck your WA groups to see where it arrived.", parse_mode="HTML")
+    except Exception as exc:
+        await update.message.reply_text(f"⚠️ Send failed: <code>{str(exc)[:300]}</code>", parse_mode="HTML")
+
+
 async def handle_wagroup_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id if query.from_user else 0
@@ -1436,6 +1491,8 @@ def build_app():
     app.add_handler(CommandHandler("callinglist",    cmd_callinglist))
     app.add_handler(CommandHandler("wagroups",       cmd_wagroups))
     app.add_handler(CommandHandler("groupdebug",     cmd_groupdebug))
+    app.add_handler(CommandHandler("recentgroups",   cmd_recentgroups))
+    app.add_handler(CommandHandler("testsend",       cmd_testsend))
     app.add_handler(CommandHandler("sethost",         cmd_sethost))
     app.add_handler(CommandHandler("setgroupid",      cmd_setgroupid))
     app.add_handler(CommandHandler("closeevent",      cmd_closeevent))
